@@ -210,22 +210,78 @@ Trust: None
 
 ---
 
-## Token Savings
+## What the LLM Actually Receives
 
-Without KaiSign, LLM needs full context:
-- Full ABI: ~5000 tokens
-- Command registry: ~800 tokens
-- Token list: ~500 tokens
-- Instructions: ~300 tokens
-- **Total: ~7000 tokens per transaction**
+MCP tools work by returning JSON responses to the LLM. The question isn't "what does the LLM need to know?" — it's "what does the tool return?"
 
-With KaiSign:
-- Verified intent: ~50 tokens
-- Key params: ~100 tokens
-- Verification status: ~30 tokens
-- **Total: ~180 tokens per transaction**
+### KaiSign MCP Tool Response
 
-**Savings: 97%+**
+When the LLM calls `validate_bankrbot_transaction`, it receives:
+
+```json
+{
+  "verified": true,
+  "source": "leaf-verified",
+  "intent": "Swap 0.01 ETH → min 25.50 USDC via Uniswap Universal Router",
+  "params": {
+    "commands": { "label": "Commands", "value": "WRAP_ETH, V3_SWAP_EXACT_IN" },
+    "deadline": { "label": "Deadline", "value": "2024-01-30 12:00:00 UTC" }
+  },
+  "warnings": [],
+  "transaction": { "to": "0x3fC9...", "selector": "0x3593564c" },
+  "verification": { "attestationUid": "0x68b05..." }
+}
+```
+
+**Response size: ~150-250 tokens**
+
+The heavy lifting (ABIs, command registries, token metadata) stays server-side in `cache-manager.ts`.
+
+### Alternative Approaches
+
+**Option A: Hardcoded ABIs in system prompt**
+- Uniswap Router ABI embedded in prompt: ~4000 tokens
+- Command registry definitions: ~800 tokens
+- This bloats *every* conversation, not just transaction ones
+- **Per-conversation overhead: ~4800+ tokens**
+
+**Option B: LLM fetches and decodes manually**
+- Call Etherscan API for ABI: response ~2000-5000 tokens
+- Parse and decode calldata: multiple tool calls
+- Interpret decoded output: additional context needed
+- **Per-transaction overhead: 3000-7000 tokens across multiple calls**
+
+**Option C: Return raw calldata**
+- Tool returns: `"data": "0x3593564c000000..."`
+- LLM sees bytes it can't interpret
+- User sees: "Function: execute(bytes,bytes[],uint256)" — meaningless
+- **Zero tokens saved, zero clarity gained**
+
+### What This Means
+
+KaiSign keeps complexity server-side:
+
+| Component | Where It Lives | Sent to LLM? |
+|-----------|----------------|--------------|
+| Contract ABIs | Server cache | No |
+| Command registries | Server cache | No |
+| Token metadata | Server cache | No |
+| Verification logic | Server-side | No |
+| **Decoded intent** | Tool response | **Yes (~150-250 tokens)** |
+
+The LLM receives a concise, actionable response — not raw ABIs or calldata.
+
+### Where the Savings Come From
+
+1. **Response efficiency**: KaiSign returns a distilled intent (~150-250 tokens), not raw decoded ABI output (~500-2000 tokens). The server does the heavy lifting of parsing commands, resolving token symbols, and formatting human-readable descriptions.
+
+2. **Single call vs multi-call**: Without KaiSign, decoding a Uniswap transaction might require: fetch ABI → decode calldata → look up command registry → resolve token addresses. Each tool call adds response overhead. KaiSign does this in one call.
+
+3. **Server-side caching**: The `cache-manager.ts` stores ABIs, command registries, and verification results. Repeated queries for the same contract don't re-fetch or re-send this data — only the decoded result is returned.
+
+4. **No system prompt bloat**: Some approaches embed ABIs in the system prompt so the LLM "knows" how to decode. This adds thousands of tokens to *every* conversation, whether or not transactions are involved. KaiSign keeps this data server-side.
+
+The savings are from returning a compact, pre-processed result instead of raw data the LLM would need to interpret.
 
 ---
 
@@ -236,7 +292,7 @@ With KaiSign:
 | Trust external APIs | Trust on-chain registry |
 | Hope ABI is correct | Verify cryptographically |
 | Manual proxy handling | Automatic |
-| ~7000 tokens/tx | ~180 tokens/tx |
+| ABIs in system prompt or multi-step decoding | ~150-250 token tool response |
 | "Function: execute" | "Swap 0.01 ETH → USDC" |
 | User confused | User confident |
 | Vulnerable to fake ABIs | Tamper-proof |
