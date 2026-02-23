@@ -16,21 +16,37 @@ export const SEPOLIA_RPC_URLS = [
   'https://sepolia.drpc.org'
 ];
 
-// RPC URLs by chain
+// RPC URLs by chain - prioritize env vars for reliable access
 export const RPC_URLS: Record<number, string[]> = {
   1: [
+    ...(process.env.ETH_RPC_URL ? [process.env.ETH_RPC_URL] : []),
     'https://eth.llamarpc.com',
     'https://ethereum-rpc.publicnode.com',
     'https://rpc.ankr.com/eth'
   ],
-  11155111: SEPOLIA_RPC_URLS,
-  10: ['https://mainnet.optimism.io'],
-  8453: ['https://mainnet.base.org'],
-  42161: ['https://arb1.arbitrum.io/rpc']
+  11155111: [
+    ...(process.env.SEPOLIA_RPC_URL ? [process.env.SEPOLIA_RPC_URL] : []),
+    ...SEPOLIA_RPC_URLS
+  ],
+  10: [
+    ...(process.env.OPTIMISM_RPC_URL ? [process.env.OPTIMISM_RPC_URL] : []),
+    'https://mainnet.optimism.io'
+  ],
+  8453: [
+    ...(process.env.BASE_RPC_URL ? [process.env.BASE_RPC_URL] : []),
+    'https://mainnet.base.org'
+  ],
+  42161: [
+    ...(process.env.ARBITRUM_RPC_URL ? [process.env.ARBITRUM_RPC_URL] : []),
+    'https://arb1.arbitrum.io/rpc'
+  ]
 };
 
 // KaiSign API
 export const KAISIGN_API = process.env.KAISIGN_API_URL || 'https://kai-sign-production.up.railway.app';
+
+// Bankrbot API
+export const BANKR_API_URL = process.env.BANKR_API_URL || 'https://api.bankr.bot';
 
 // Cache settings
 export const CACHE_TTL = 300000; // 5 minutes

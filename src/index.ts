@@ -16,6 +16,8 @@ import {
 import { verifyContractMetadata, verifyMetadataSchema } from './tools/verify-metadata.js';
 import { decodeTransaction, decodeTransactionSchema } from './tools/decode-transaction.js';
 import { getCachedMetadata, getCachedMetadataSchema, clearCache, pruneExpiredCache } from './tools/get-cached-metadata.js';
+import { validateBankrbotTransaction, validateBankrbotTxSchema } from './tools/validate-bankrbot-tx.js';
+import { getClearSignPrompt, getClearSignPromptSchema } from './tools/get-clear-sign-prompt.js';
 
 // Create MCP server
 const server = new Server(
@@ -157,6 +159,95 @@ Returns:
       type: 'object',
       properties: {}
     }
+  },
+  {
+    name: 'validate_bankrbot_transaction',
+    description: `Validate a transaction payload from Bankrbot against KaiSign Registry.
+
+This tool is designed for the agent signing flow:
+1. Bankrbot builds a transaction from natural language (e.g., "swap $10 ETH to USDC")
+2. This tool validates the transaction against KaiSign's on-chain verified metadata
+3. If verified (source: 'leaf-verified'), the decoded intent is trustworthy
+4. User can confidently sign knowing the transaction matches their intent
+
+Returns:
+- verified: true if contract has KaiSign-verified metadata
+- source: 'leaf-verified' (trustless on-chain), 'api-only', 'unverified', or 'error'
+- intent: Human-readable description of what the transaction does
+- params: Decoded function parameters with labels
+- warnings: Any concerns about the transaction
+- verification: Attestation details (uid, metadataHash, idx, revoked status)`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: {
+          type: 'string',
+          description: 'Target contract address (0x...)',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        },
+        data: {
+          type: 'string',
+          description: 'Transaction calldata (0x...)',
+          pattern: '^0x[a-fA-F0-9]+$'
+        },
+        chainId: {
+          type: 'number',
+          description: 'Chain ID (default: 8453 for Base)',
+          default: 8453
+        },
+        value: {
+          type: 'string',
+          description: 'Transaction value in wei (default: "0")',
+          default: '0'
+        }
+      },
+      required: ['to', 'data']
+    }
+  },
+  {
+    name: 'get_clear_sign_prompt',
+    description: `Get a clear signing prompt for user confirmation.
+
+This tool provides a formatted display for transaction signing flows:
+1. Takes a transaction payload (to, data, value, chainId)
+2. Verifies the contract against KaiSign on-chain registry
+3. Decodes the transaction intent
+4. Returns formatted display text for user confirmation
+
+Use this when presenting transactions to users for signing. The response includes:
+- displayText: Formatted text ready for display (includes verification badge, intent, warnings)
+- verified: Whether the contract has on-chain verified metadata
+- verificationBadge: "✓ Verified", "⚠ API Only", or "⚠ Unverified"
+- intent: Human-readable description of transaction
+- functionName: The function being called
+- warnings: Any concerns about the transaction
+- transaction: The original transaction payload for signing`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: {
+          type: 'string',
+          description: 'Target contract address (0x...)',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        },
+        data: {
+          type: 'string',
+          description: 'Transaction calldata (0x...)',
+          pattern: '^0x[a-fA-F0-9]+$'
+        },
+        chainId: {
+          type: 'number',
+          description: 'Chain ID (default: 8453 for Base)',
+          default: 8453
+        },
+        value: {
+          type: 'string',
+          description: 'Transaction value in wei (default: "0")',
+          default: '0'
+        }
+      },
+      required: ['to', 'data']
+    }
   }
 ];
 
@@ -224,6 +315,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'prune_expired_cache': {
         const result = await pruneExpiredCache();
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      case 'validate_bankrbot_transaction': {
+        const input = validateBankrbotTxSchema.parse(args);
+        const result = await validateBankrbotTransaction(input);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      case 'get_clear_sign_prompt': {
+        const input = getClearSignPromptSchema.parse(args);
+        const result = await getClearSignPrompt(input);
         return {
           content: [
             {
