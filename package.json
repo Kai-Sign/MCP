@@ -1,9 +1,30 @@
 {
   "name": "kaisign-mcp",
   "version": "1.0.0",
-  "description": "KaiSign MCP Server - Metadata verification for LLM transaction decoding",
+  "description": "KaiSign MCP Server - Verified transaction decoding for LLM agents using on-chain attested metadata",
   "type": "module",
   "main": "dist/index.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kai-Sign/MCP.git"
+  },
+  "homepage": "https://github.com/Kai-Sign/MCP#readme",
+  "bugs": {
+    "url": "https://github.com/Kai-Sign/MCP/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ethereum",
+    "transaction-decoding",
+    "verification",
+    "erc-7730",
+    "clear-signing",
+    "bankrbot",
+    "web3",
+    "blockchain"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
