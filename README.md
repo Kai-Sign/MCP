@@ -2,7 +2,7 @@
 
 **Verified transaction decoding for LLM agents using on-chain attested metadata.**
 
-KaiSign is an MCP (Model Context Protocol) server that enables AI agents to decode Ethereum transactions with cryptographic proof of authenticity. Instead of trusting external APIs like Etherscan for ABIs, KaiSign verifies contract metadata against an on-chain registry — giving users confidence that decoded transaction intent is genuine.
+This is an MCP (Model Context Protocol) server for the KaiSign on-chain registry — enabling AI agents to decode Ethereum transactions with cryptographic proof of authenticity. Instead of trusting external APIs like Etherscan for ABIs, this server verifies contract metadata against KaiSign's on-chain attestations — giving users confidence that decoded transaction intent is genuine.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org)
@@ -81,10 +81,10 @@ These contracts have on-chain attested metadata in the KaiSign Registry and can 
 
 | Chain | Chain ID | Default RPC |
 |-------|----------|-------------|
-| Ethereum Mainnet | 1 | `https://eth.llamarpc.com` |
-| Optimism | 10 | `https://mainnet.optimism.io` |
-| Base | 8453 | `https://mainnet.base.org` |
-| Arbitrum | 42161 | `https://arb1.arbitrum.io/rpc` |
+| Ethereum Mainnet | 1 | `https://ethereum-rpc.publicnode.com` |
+| Optimism | 10 | `https://optimism-rpc.publicnode.com` |
+| Base | 8453 | `https://base-rpc.publicnode.com` |
+| Arbitrum | 42161 | `https://arbitrum-one-rpc.publicnode.com` |
 | Sepolia (testnet) | 11155111 | `https://ethereum-sepolia-rpc.publicnode.com` |
 
 ## Quick Start
@@ -297,14 +297,35 @@ Tool: prune_expired_cache
 
 [Bankrbot](https://bankr.bot) is an LLM-based transaction building agent that accepts natural language prompts and builds Ethereum transactions.
 
-### End-to-End Flow
+### End-to-End Flow (User-in-the-Loop)
 
 1. **User says:** "swap 0.01 ETH to USDC on Base"
-2. **Bankrbot** builds the transaction (calldata, target contract, value)
+2. **Bankrbot** builds the unsigned transaction (calldata, target contract, value)
 3. **KaiSign MCP** verifies the contract against the on-chain registry
 4. **KaiSign MCP** decodes the calldata into human-readable intent
 5. **User sees:** "Swap 0.01 ETH → min 25.50 USDC via Uniswap Universal Router ✓ Verified"
-6. **User confirms** and signs the transaction with confidence
+6. **User confirms** and signs the transaction
+
+### Autonomous Agent Flow
+
+The same flow works without user confirmation — the LLM verifies and decides on its own:
+
+1. **LLM** sends prompt to Bankrbot → receives unsigned transaction payload
+2. **LLM** calls KaiSign MCP → verifies contract metadata on-chain + decodes intent
+3. **LLM** checks: `verified: true`, no warnings, intent matches original request
+4. **LLM** proceeds or halts based on verification result
+
+```
+LLM prompt: "swap 0.01 ETH to USDC on Base"
+        │
+        ▼
+┌─────────────────┐     ┌──────────────────────┐     ┌──────────────┐
+│   Bankrbot API  │────▶│  KaiSign MCP Server   │────▶│  LLM decides │
+│  (unsigned tx)  │     │  (verify + decode)    │     │  (proceed?)  │
+└─────────────────┘     └──────────────────────┘     └──────────────┘
+```
+
+This is useful for fully autonomous agents that need to transact without human oversight while still maintaining cryptographic trust guarantees. The LLM never signs a transaction it can't independently verify.
 
 ### Setup
 
@@ -313,7 +334,7 @@ Tool: prune_expired_cache
 3. Connect the KaiSign MCP server to Claude
 4. Ask Claude to build and verify transactions using natural language
 
-### Example Conversation with Claude
+### Example: User-in-the-Loop
 
 ```
 You: "Swap $10 of ETH to USDC on Base"
@@ -330,6 +351,20 @@ Value: 0.01 ETH
 Verification: On-chain leaf-verified
 
 Would you like to proceed with this transaction?
+```
+
+### Example: Autonomous Agent
+
+```
+Agent: Build swap 0.01 ETH to USDC on Base
+  → Bankrbot returns unsigned tx {to, data, value, chainId}
+
+Agent: Verify transaction with KaiSign
+  → verified: true, source: leaf-verified
+  → intent: "Swap 0.01 ETH → min 25.50 USDC via Uniswap Universal Router"
+  → warnings: []
+
+Agent: Verification passed, intent matches request → proceeding
 ```
 
 ## Architecture
