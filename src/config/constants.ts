@@ -20,8 +20,8 @@ export const SEPOLIA_RPC_URLS = [
 export const RPC_URLS: Record<number, string[]> = {
   1: [
     ...(process.env.ETH_RPC_URL ? [process.env.ETH_RPC_URL] : []),
-    'https://eth.llamarpc.com',
     'https://ethereum-rpc.publicnode.com',
+    'https://eth.llamarpc.com',
     'https://rpc.ankr.com/eth'
   ],
   11155111: [
@@ -30,14 +30,17 @@ export const RPC_URLS: Record<number, string[]> = {
   ],
   10: [
     ...(process.env.OPTIMISM_RPC_URL ? [process.env.OPTIMISM_RPC_URL] : []),
+    'https://optimism-rpc.publicnode.com',
     'https://mainnet.optimism.io'
   ],
   8453: [
     ...(process.env.BASE_RPC_URL ? [process.env.BASE_RPC_URL] : []),
+    'https://base-rpc.publicnode.com',
     'https://mainnet.base.org'
   ],
   42161: [
     ...(process.env.ARBITRUM_RPC_URL ? [process.env.ARBITRUM_RPC_URL] : []),
+    'https://arbitrum-one-rpc.publicnode.com',
     'https://arb1.arbitrum.io/rpc'
   ]
 };
