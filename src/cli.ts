@@ -108,11 +108,20 @@ function boolResult(value: unknown): boolean {
 
 function formatPlain(result: Record<string, unknown>): string {
   const verified = boolResult(result.verified) || boolResult(result.metadataHashVerified);
-  const safe = boolResult(result.safeToSign) || boolResult(result.safeToAutonomouslySign) || boolResult(result.fullyClearSigned);
+  const decoded = boolResult(result.decoded);
+  const source = result.source;
+  const isLocalFile = source === 'local-file';
   const lines: string[] = [];
 
-  lines.push(verified ? '✓ KaiSign verified' : '⚠ KaiSign not fully verified');
-  lines.push(`Safe to sign: ${safe ? 'yes' : 'no'}`);
+  if (isLocalFile) {
+    lines.push(decoded ? 'Decoded' : 'Decode failed');
+  } else {
+    lines.push(verified ? '✓ KaiSign verified' : '⚠ KaiSign not fully verified');
+  }
+  if (!isLocalFile) {
+    const safe = boolResult(result.safeToSign) || boolResult(result.safeToAutonomouslySign) || boolResult(result.fullyClearSigned);
+    lines.push(`Safe to sign: ${safe ? 'yes' : 'no'}`);
+  }
   if (result.source) lines.push(`Source: ${String(result.source)}`);
   if (result.functionName) lines.push(`Function: ${String(result.functionName)}`);
   lines.push(`Intent: ${String(result.aggregatedIntent ?? result.intent ?? 'Unknown transaction')}`);
@@ -150,9 +159,10 @@ export async function runCli(
 
   try {
     const result = await deps.clearSignTransaction(input) as Record<string, unknown>;
-    const safe = boolResult(result.safeToSign) || boolResult(result.safeToAutonomouslySign) || boolResult(result.fullyClearSigned);
+    const isLocalFile = result.source === 'local-file';
+    const ok = isLocalFile ? boolResult(result.decoded) : (boolResult(result.safeToSign) || boolResult(result.safeToAutonomouslySign) || boolResult(result.fullyClearSigned));
     const stdout = flags.json ? `${JSON.stringify(result, null, 2)}\n` : formatPlain(result);
-    return { exitCode: safe ? 0 : 1, stdout, stderr: '' };
+    return { exitCode: ok ? 0 : 1, stdout, stderr: '' };
   } catch (error) {
     return { exitCode: 1, stdout: '', stderr: `${(error as Error).message}\n` };
   }

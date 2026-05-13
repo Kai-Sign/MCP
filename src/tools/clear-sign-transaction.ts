@@ -14,6 +14,7 @@ export interface ClearSignTransactionResult {
   verified: boolean;
   fullyClearSigned: boolean;
   safeToSign: boolean;
+  decoded: boolean;
   source?: string;
   intent: string;
   aggregatedIntent: string;
@@ -83,7 +84,7 @@ export async function clearSignTransaction(input: ClearSignTransactionInput): Pr
     warnings.push('CRITICAL: could not bind fetched metadata JSON to attested metadataHash');
   }
 
-  const localClearSigned = Boolean(
+  const localDecoded = Boolean(
     decoded.success &&
     !decoded.hasUnknownInnerCalls &&
     !decoded.truncated &&
@@ -91,13 +92,14 @@ export async function clearSignTransaction(input: ClearSignTransactionInput): Pr
     !decoded.error
   );
   const fullyClearSigned = usingLocalMetadata
-    ? localClearSigned
+    ? false
     : Boolean(decoded.fullyClearSigned && metadataHashVerified);
 
   return {
     verified: usingLocalMetadata ? false : Boolean(decoded.verified && metadataHashVerified),
     fullyClearSigned,
-    safeToSign: fullyClearSigned,
+    safeToSign: usingLocalMetadata ? false : fullyClearSigned,
+    decoded: usingLocalMetadata ? localDecoded : Boolean(decoded.success && !decoded.error),
     source: usingLocalMetadata ? 'local-file' : decoded.source,
     intent: decoded.intent,
     aggregatedIntent: decoded.aggregatedIntent,

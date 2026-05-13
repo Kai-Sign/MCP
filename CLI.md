@@ -90,8 +90,7 @@ CLI tests/docs:
 Plain output:
 
 ```text
-⚠ KaiSign not fully verified
-Safe to sign: yes
+Decoded
 Source: local-file
 Function: transfer
 Intent: Transfer 10 USDC to 0x...
@@ -105,6 +104,6 @@ node dist/cli.js clear-sign --metadata ./usdc.json --tx 0x02f8... --json
 
 ## Exit codes
 
-- `0`: decoded with the provided metadata and safe to sign
-- `1`: ran but could not fully clear-sign / not safe
+- `0`: decoded with the provided metadata
+- `1`: decode failed or could not resolve
 - `2`: invalid input
