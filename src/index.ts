@@ -78,7 +78,7 @@ metadata from the KaiSign registry. It provides:
 - Function name and signature
 - Decoded parameters with labels and formatted values
 - Intent description (e.g., "Swap 1.5 ETH for min 3000 USDC")
-- Command decoding for Universal Router transactions
+- Metadata-declared command registry decoding
 - On-chain verification of metadata authenticity
 
 Token savings: Cached metadata enables 80%+ token savings on repeated queries

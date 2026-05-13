@@ -58,6 +58,72 @@ const SIMULATED_FULL_ABI = [
   // ... simplified for test, real ABI is ~5000+ tokens
 ];
 
+function seedVerifiedUniswapRouterMetadata(): void {
+  cacheManager.setMetadata(TEST_CONTRACTS.UNISWAP_ROUTER_MAINNET.address, 1, {
+    context: {
+      contract: {
+        name: 'Uniswap Universal Router',
+        abi: [
+          {
+            type: 'function',
+            name: 'execute',
+            inputs: [
+              { name: 'commands', type: 'bytes' },
+              { name: 'inputs', type: 'bytes[]' },
+              { name: 'deadline', type: 'uint256' }
+            ]
+          }
+        ]
+      }
+    },
+    metadata: { name: 'Uniswap Universal Router' },
+    display: {
+      formats: {
+        'execute(bytes,bytes[],uint256)': {
+          intent: {
+            type: 'composite',
+            registry: 'universalRouterCommands',
+            commandPath: 'commands',
+            inputPath: 'inputs',
+            separator: ' + '
+          },
+          recursive: [{ type: 'commands', commandRegistry: 'universalRouterCommands', commandPath: 'commands', inputPath: 'inputs' }]
+        }
+      }
+    },
+    commandRegistries: {
+      universalRouterCommands: {
+        '0x0b': {
+          name: 'WRAP_ETH',
+          intent: 'Wrap ETH to WETH',
+          inputs: [
+            { name: 'recipient', type: 'address' },
+            { name: 'amountMin', type: 'uint256' }
+          ]
+        },
+        '0x00': {
+          name: 'V3_SWAP_EXACT_IN',
+          intent: 'Swap exact input tokens',
+          inputs: [
+            { name: 'recipient', type: 'address' },
+            { name: 'amountIn', type: 'uint256' },
+            { name: 'amountOutMin', type: 'uint256' },
+            { name: 'path', type: 'bytes' },
+            { name: 'payerIsUser', type: 'bool' }
+          ]
+        }
+      }
+    },
+    _verification: {
+      verified: true,
+      source: 'leaf-verified',
+      details: 'test fixture mirrors on-chain verified metadata for deterministic decode tests',
+      hash: '0x' + '11'.repeat(32),
+      onChainHash: '0x' + '11'.repeat(32)
+    }
+  });
+}
+
 // Full ABI context that an LLM would need for manual verification
 const MANUAL_VERIFICATION_CONTEXT = {
   abi: {
@@ -289,6 +355,7 @@ describe('Proof 2: Intent Matches Calldata', () => {
 describe('Proof 3: End-to-End Trust Flow', () => {
   beforeEach(() => {
     cacheManager.clearAll();
+    seedVerifiedUniswapRouterMetadata();
   });
 
   it('proves complete trust chain from calldata to verified intent', async () => {

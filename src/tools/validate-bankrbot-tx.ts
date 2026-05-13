@@ -4,9 +4,8 @@
  */
 
 import { z } from 'zod';
-import { transactionDecoder } from '../services/abi-decoder.js';
+import { recursiveCalldataDecoder, type RecursiveCallNode } from '../services/recursive-decoder.js';
 import { onChainVerifier } from '../services/onchain-verifier.js';
-import { cacheManager } from '../services/cache-manager.js';
 
 export const validateBankrbotTxSchema = z.object({
   to: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
@@ -18,14 +17,15 @@ export const validateBankrbotTxSchema = z.object({
 export type ValidateBankrbotTxInput = z.infer<typeof validateBankrbotTxSchema>;
 
 export interface ValidateBankrbotTxResult {
-  /** Whether the contract has KaiSign-verified metadata */
+  /** Whether the outer contract has leaf-verified KaiSign metadata */
   verified: boolean;
 
   /** Verification source: 'leaf-verified' (trustless), 'api-only', 'unverified', or 'error' */
-  source: 'leaf-verified' | 'api-only' | 'unverified' | 'error';
+  source: 'leaf-verified' | 'api-only' | 'unverified' | 'mismatch' | 'error';
 
   /** Human-readable description of transaction intent */
   intent: string;
+  aggregatedIntent: string;
 
   /** Decoded function parameters */
   params: Record<string, {
@@ -33,6 +33,17 @@ export interface ValidateBankrbotTxResult {
     value: string;
     rawValue: string;
   }>;
+
+  nestedCalls: RecursiveCallNode[];
+  callTree?: RecursiveCallNode;
+  nestedIntents: string[];
+
+  /** Agent-safe decision fields */
+  fullyDecoded: boolean;
+  hasUnknownInnerCalls: boolean;
+  hasUnverifiedMetadata: boolean;
+  requiresHumanReview: boolean;
+  safeToAutonomouslySign: boolean;
 
   /** Any warnings about the transaction */
   warnings: string[];
@@ -59,6 +70,10 @@ export interface ValidateBankrbotTxResult {
   error?: string;
 }
 
+function hasCriticalWarning(warnings: string[]): boolean {
+  return warnings.some(w => /unknown|unverified|mismatch|revoked|cycle|max depth|truncated|decode failed|error/i.test(w));
+}
+
 /**
  * Validate a transaction payload from Bankrbot
  *
@@ -66,9 +81,6 @@ export interface ValidateBankrbotTxResult {
  * 1. Bankrbot builds transaction from natural language
  * 2. This tool validates the transaction against KaiSign registry
  * 3. If verified, user can confidently sign
- *
- * @param input Transaction payload (to, data, chainId, value)
- * @returns Validation result with decoded intent and verification status
  */
 export async function validateBankrbotTransaction(
   input: ValidateBankrbotTxInput
@@ -77,16 +89,21 @@ export async function validateBankrbotTransaction(
 
   const contractAddress = to.toLowerCase();
   const warnings: string[] = [];
-
-  // Extract selector
   const selector = data.length >= 10 ? data.slice(0, 10) : '0x';
 
-  // Initialize result
   const result: ValidateBankrbotTxResult = {
     verified: false,
     source: 'unverified',
     intent: 'Unknown transaction',
+    aggregatedIntent: 'Unknown transaction',
     params: {},
+    nestedCalls: [],
+    nestedIntents: [],
+    fullyDecoded: false,
+    hasUnknownInnerCalls: false,
+    hasUnverifiedMetadata: false,
+    requiresHumanReview: true,
+    safeToAutonomouslySign: false,
     warnings,
     transaction: {
       to: contractAddress,
@@ -98,13 +115,12 @@ export async function validateBankrbotTransaction(
   };
 
   try {
-    // Step 1: Verify contract metadata on-chain
+    // Step 1: Verify outer contract metadata on-chain.
     const verificationResult = await onChainVerifier.verifyMetadata(contractAddress, chainId);
 
-    result.verified = verificationResult.verified;
+    result.verified = verificationResult.verified && verificationResult.source === 'leaf-verified';
     result.source = verificationResult.source as ValidateBankrbotTxResult['source'];
 
-    // Extract attestation details from verification result
     if (verificationResult.uid || verificationResult.attestationComponents) {
       result.verification = {
         attestationUid: verificationResult.uid,
@@ -113,49 +129,45 @@ export async function validateBankrbotTransaction(
         revoked: verificationResult.attestationComponents?.revoked
       };
 
-      // Warn if attestation is revoked
       if (verificationResult.attestationComponents?.revoked) {
-        warnings.push('WARNING: Contract metadata attestation has been revoked');
+        warnings.push('CRITICAL: Contract metadata attestation has been revoked');
         result.verified = false;
       }
     }
 
-    // Step 2: Decode transaction using metadata
-    const decoded = await transactionDecoder.decodeCalldata(data, contractAddress, chainId);
+    // Step 2: Decode recursively through metadata-declared rules only.
+    const decoded = await recursiveCalldataDecoder.decode(data, contractAddress, chainId, value);
 
-    if (decoded.success) {
-      result.intent = decoded.intent;
-      result.transaction.functionName = decoded.functionName;
+    result.intent = decoded.aggregatedIntent || decoded.root.intent;
+    result.aggregatedIntent = decoded.aggregatedIntent || decoded.root.intent;
+    result.transaction.functionName = decoded.root.functionName;
+    result.nestedCalls = decoded.nestedCalls;
+    result.callTree = decoded.callTree;
+    result.nestedIntents = decoded.nestedIntents;
+    result.hasUnknownInnerCalls = decoded.hasUnknownInnerCalls;
+    result.hasUnverifiedMetadata = decoded.hasUnverifiedMetadata;
+    warnings.push(...decoded.warnings);
 
-      // Format params
-      for (const [key, val] of Object.entries(decoded.formatted)) {
+    if (decoded.root.success) {
+      for (const [key, val] of Object.entries(decoded.root.formatted)) {
         result.params[key] = {
           label: val.label,
           value: val.value,
           rawValue: val.rawValue
         };
       }
-
-      // Add command decoding for Universal Router
-      if (decoded.decodedCommands && decoded.decodedCommands.length > 0) {
-        // Append command intents to main intent
-        const commandIntents = decoded.decodedCommands.map(cmd => cmd.intent).join(', then ');
-        if (commandIntents) {
-          result.intent = commandIntents;
-        }
-      }
     } else {
-      warnings.push(`Decoding failed: ${decoded.error || 'Unknown error'}`);
+      warnings.push(`Decoding failed: ${decoded.root.error || 'Unknown error'}`);
     }
 
-    // Step 3: Add source-specific warnings
     if (result.source === 'api-only') {
       warnings.push('Metadata verified via API only, not on-chain. Consider waiting for on-chain attestation.');
     } else if (result.source === 'unverified') {
       warnings.push('Contract has no verified metadata. Transaction intent cannot be independently verified.');
+    } else if (result.source === 'mismatch') {
+      warnings.push('CRITICAL: Metadata hash mismatch. Do not sign autonomously.');
     }
 
-    // Step 4: Check for suspicious patterns
     if (BigInt(value) > BigInt(0)) {
       const ethValue = Number(BigInt(value)) / 1e18;
       if (ethValue > 10) {
@@ -163,21 +175,27 @@ export async function validateBankrbotTransaction(
       }
     }
 
-    // Check for known risky selectors
-    const riskySelectors: Record<string, string> = {
-      '0x095ea7b3': 'approve',
-      '0xa22cb465': 'setApprovalForAll',
-      '0x42842e0e': 'safeTransferFrom'
-    };
-
-    if (selector in riskySelectors && !result.verified) {
-      warnings.push(`Unverified ${riskySelectors[selector]} call - verify target contract before signing`);
-    }
-
+    const hasCritical = hasCriticalWarning(warnings);
+    result.fullyDecoded = Boolean(decoded.root.success && !decoded.hasUnknownInnerCalls && !decoded.truncated && !decoded.cycleDetected && decoded.errors.length === 0);
+    result.hasUnverifiedMetadata = result.hasUnverifiedMetadata || !result.verified;
+    result.requiresHumanReview = Boolean(!result.fullyDecoded || !result.verified || result.hasUnknownInnerCalls || result.hasUnverifiedMetadata || hasCritical);
+    result.safeToAutonomouslySign = Boolean(
+      result.verified &&
+      result.source === 'leaf-verified' &&
+      result.fullyDecoded &&
+      !result.hasUnknownInnerCalls &&
+      !result.hasUnverifiedMetadata &&
+      !decoded.truncated &&
+      !decoded.cycleDetected &&
+      !result.verification?.revoked &&
+      !hasCritical
+    );
   } catch (error) {
     result.source = 'error';
     result.error = error instanceof Error ? error.message : 'Unknown error';
     warnings.push(`Verification error: ${result.error}`);
+    result.requiresHumanReview = true;
+    result.safeToAutonomouslySign = false;
   }
 
   return result;

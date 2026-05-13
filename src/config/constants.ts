@@ -3,7 +3,7 @@
  */
 
 // KaiSign Registry contract on Sepolia
-export const KAISIGN_REGISTRY = '0xC203e8C22eFCA3C9218a6418f6d4281Cb7744dAa';
+export const KAISIGN_REGISTRY = process.env.KAISIGN_REGISTRY_ADDRESS || '0x655084b6A0f2Ee600bd31A71820b5E068b7870d0';
 
 // Chain IDs
 export const SEPOLIA_CHAIN_ID = 11155111;

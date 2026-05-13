@@ -4,7 +4,7 @@
  */
 
 import { z } from 'zod';
-import { transactionDecoder, DecodedTransaction } from '../services/abi-decoder.js';
+import { recursiveCalldataDecoder, type RecursiveCallNode } from '../services/recursive-decoder.js';
 import { onChainVerifier } from '../services/onchain-verifier.js';
 import { cacheManager } from '../services/cache-manager.js';
 
@@ -20,12 +20,21 @@ export type DecodeTransactionInput = z.infer<typeof decodeTransactionSchema>;
 
 export interface DecodeTransactionResult {
   success: boolean;
+  verified: boolean;
+  source?: string;
   contractAddress: string;
   chainId: number;
   selector: string;
   functionName?: string;
   functionSignature?: string;
   intent: string;
+  aggregatedIntent: string;
+  root: RecursiveCallNode;
+  nestedCalls: RecursiveCallNode[];
+  nestedCallsTree: RecursiveCallNode;
+  callTree: RecursiveCallNode;
+  nestedIntents: string[];
+  warnings: string[];
   params: Record<string, {
     label: string;
     value: string;
@@ -44,6 +53,11 @@ export interface DecodeTransactionResult {
   };
   cacheStatus: 'hit' | 'miss';
   approximateTokensSaved?: number;
+  hasUnknownInnerCalls: boolean;
+  hasUnverifiedMetadata: boolean;
+  truncated: boolean;
+  cycleDetected: boolean;
+  fullyClearSigned: boolean;
   error?: string;
 }
 
@@ -61,8 +75,8 @@ export async function decodeTransaction(
   const cacheInfo = cacheManager.getCacheEntryInfo(contractAddress, chainId);
   const cacheStatus: 'hit' | 'miss' = cacheInfo.found ? 'hit' : 'miss';
 
-  // Decode transaction
-  const decoded = await transactionDecoder.decodeCalldata(data, contractAddress, chainId);
+  // Decode transaction recursively through metadata-declared rules only.
+  const decoded = await recursiveCalldataDecoder.decode(data, contractAddress, chainId, value);
 
   // Run verification unless skipped
   let verification: DecodeTransactionResult['verification'];
@@ -85,7 +99,7 @@ export async function decodeTransaction(
 
   // Format params for output
   const params: DecodeTransactionResult['params'] = {};
-  for (const [key, val] of Object.entries(decoded.formatted)) {
+  for (const [key, val] of Object.entries(decoded.root.formatted)) {
     params[key] = {
       label: val.label,
       value: val.value,
@@ -97,20 +111,38 @@ export async function decodeTransaction(
   // Calculate token savings for cache hits
   let approximateTokensSaved: number | undefined;
   if (cacheStatus === 'hit' && cacheInfo.approximateTokens) {
-    // Estimate that cached response saves ~80% of tokens vs full metadata
     approximateTokensSaved = Math.floor(cacheInfo.approximateTokens * 0.8);
   }
 
+  const fullyClearSigned = Boolean(
+    decoded.root.success &&
+    decoded.callTree.verified &&
+    !decoded.hasUnknownInnerCalls &&
+    !decoded.hasUnverifiedMetadata &&
+    !decoded.truncated &&
+    !decoded.cycleDetected &&
+    decoded.warnings.length === 0
+  );
+
   return {
-    success: decoded.success,
+    success: decoded.root.success,
+    verified: decoded.callTree.verified,
+    source: decoded.callTree.source,
     contractAddress,
     chainId,
-    selector: decoded.selector,
-    functionName: decoded.functionName,
-    functionSignature: decoded.function,
-    intent: decoded.intent,
+    selector: decoded.root.selector,
+    functionName: decoded.root.functionName,
+    functionSignature: decoded.root.function,
+    intent: decoded.root.intent,
+    aggregatedIntent: decoded.aggregatedIntent,
+    root: decoded.callTree,
+    nestedCalls: decoded.nestedCalls,
+    nestedCallsTree: decoded.callTree,
+    callTree: decoded.callTree,
+    nestedIntents: decoded.nestedIntents,
+    warnings: decoded.warnings,
     params,
-    decodedCommands: decoded.decodedCommands?.map(cmd => ({
+    decodedCommands: decoded.root.decodedCommands?.map(cmd => ({
       command: cmd.command,
       name: cmd.name,
       intent: cmd.intent
@@ -118,6 +150,11 @@ export async function decodeTransaction(
     verification,
     cacheStatus,
     approximateTokensSaved,
-    error: decoded.error
+    hasUnknownInnerCalls: decoded.hasUnknownInnerCalls,
+    hasUnverifiedMetadata: decoded.hasUnverifiedMetadata,
+    truncated: decoded.truncated,
+    cycleDetected: decoded.cycleDetected,
+    fullyClearSigned,
+    error: decoded.root.error
   };
 }

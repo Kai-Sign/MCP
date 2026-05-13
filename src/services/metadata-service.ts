@@ -32,8 +32,22 @@ export interface ContractMetadata {
   display?: {
     formats?: Record<string, DisplayFormat>;
   };
+  recursive?: RecursiveRule[];
+  recursiveRules?: RecursiveRule[];
   commandRegistries?: Record<string, CommandRegistry>;
   _verification?: VerificationResult;
+}
+
+export interface RecursiveRule {
+  type: 'calldata' | 'calls' | 'commands' | string;
+  calldataPath?: string;
+  targetPath?: string;
+  valuePath?: string;
+  chainIdPath?: string;
+  callsPath?: string;
+  commandRegistry?: string;
+  inputPath?: string;
+  commandPath?: string;
 }
 
 export interface ABIEntry {
@@ -50,9 +64,23 @@ export interface ABIInput {
 }
 
 export interface DisplayFormat {
-  intent?: string | { type: string; template?: string };
+  intent?: string | {
+    type: string;
+    template?: string;
+    registry?: string;
+    source?: string;
+    commandPath?: string;
+    inputPath?: string;
+    inputs?: string;
+    separator?: string;
+    maxDisplay?: number;
+    overflow?: string;
+    format?: unknown[];
+  };
   interpolatedIntent?: string;
   fields?: FieldDefinition[];
+  recursive?: RecursiveRule[];
+  recursiveRules?: RecursiveRule[];
 }
 
 export interface FieldDefinition {
@@ -72,6 +100,8 @@ export interface CommandDefinition {
   name: string;
   intent?: string;
   inputs?: ABIInput[];
+  recursive?: RecursiveRule[];
+  recursiveRules?: RecursiveRule[];
 }
 
 export interface TokenMetadata {
@@ -179,8 +209,10 @@ export class MetadataService {
   /**
    * Fetch metadata from API
    */
-  private async fetchMetadataFromAPI(address: string, chainId: number): Promise<ContractMetadata | null> {
-    const url = `${this.apiBase}/api/py/contract/${address.toLowerCase()}?chain_id=${chainId}`;
+  private async fetchMetadataFromAPI(address: string, chainId: number, selector?: string): Promise<ContractMetadata | null> {
+    const params = new URLSearchParams({ chain_id: String(chainId) });
+    if (selector) params.set('selector', selector.toLowerCase());
+    const url = `${this.apiBase}/api/py/contract/${address.toLowerCase()}?${params.toString()}`;
 
     const response = await fetch(url);
     const data = await response.json() as { success: boolean; metadata?: ContractMetadata; error?: string };
@@ -210,7 +242,7 @@ export class MetadataService {
 
     try {
       // Try direct lookup first
-      let metadata = await this.fetchMetadataFromAPI(normalizedAddress, chainId);
+      let metadata = await this.fetchMetadataFromAPI(normalizedAddress, chainId, selector);
 
       // If no metadata, try proxy detection
       if (!metadata) {
@@ -218,7 +250,7 @@ export class MetadataService {
         if (selector) {
           const facetAddress = await this.getDiamondFacetAddress(normalizedAddress, selector, chainId);
           if (facetAddress && facetAddress !== normalizedAddress) {
-            metadata = await this.fetchMetadataFromAPI(facetAddress, chainId);
+            metadata = await this.fetchMetadataFromAPI(facetAddress, chainId, selector);
           }
         }
 
@@ -226,7 +258,7 @@ export class MetadataService {
         if (!metadata) {
           const implAddress = await this.getImplementationAddress(normalizedAddress, chainId);
           if (implAddress && implAddress !== normalizedAddress) {
-            metadata = await this.fetchMetadataFromAPI(implAddress, chainId);
+            metadata = await this.fetchMetadataFromAPI(implAddress, chainId, selector);
           }
         }
       }

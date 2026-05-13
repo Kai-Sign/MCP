@@ -4,7 +4,7 @@
  */
 
 import { keccak256, toUtf8Bytes } from 'ethers';
-import { ABIEntry, ABIInput, FieldDefinition, CommandRegistry, TokenMetadata } from './metadata-service.js';
+import { ABIEntry, ABIInput, FieldDefinition, CommandRegistry, TokenMetadata, RecursiveRule } from './metadata-service.js';
 import { metadataService } from './metadata-service.js';
 
 export interface DecodedTransaction {
@@ -18,6 +18,7 @@ export interface DecodedTransaction {
   formatted: Record<string, FormattedParam>;
   metadata?: unknown;
   decodedCommands?: DecodedCommand[];
+  recursiveRules?: RecursiveRule[];
   nestedIntents?: string[];
   error?: string;
 }
@@ -35,6 +36,63 @@ export interface DecodedCommand {
   name: string;
   intent: string;
   params: Record<string, unknown>;
+  inputRaw?: string;
+  inputIndex?: number;
+  registryName?: string;
+  recursive?: RecursiveRule[];
+}
+
+function canonicalParamType(input: ABIInput): string {
+  const arraySuffix = input.type.match(/(\[[^\]]*\])+$/)?.[0] ?? '';
+  const baseType = arraySuffix ? input.type.slice(0, -arraySuffix.length) : input.type;
+
+  if (baseType === 'tuple' && input.components) {
+    return `(${input.components.map(canonicalParamType).join(',')})${arraySuffix}`;
+  }
+
+  return input.type;
+}
+
+function legacyParamType(input: ABIInput): string {
+  return input.type;
+}
+
+function compositeIntentRule(format?: { intent?: unknown }): { rule?: RecursiveRule; separator?: string; maxDisplay?: number; overflow?: string } {
+  const intent = format?.intent;
+  if (!intent || typeof intent !== 'object') return {};
+  const config = intent as {
+    type?: string;
+    registry?: string;
+    source?: string;
+    commandPath?: string;
+    inputPath?: string;
+    inputs?: string;
+    separator?: string;
+    maxDisplay?: number;
+    overflow?: string;
+  };
+  if (config.type !== 'composite' || !config.registry) return {};
+  const commandPath = config.commandPath ?? config.source;
+  const inputPath = config.inputPath ?? config.inputs ?? 'inputs';
+  if (!commandPath || !inputPath) return {};
+  return {
+    rule: { type: 'commands', commandRegistry: config.registry, commandPath, inputPath },
+    separator: config.separator,
+    maxDisplay: config.maxDisplay,
+    overflow: config.overflow
+  };
+}
+
+function buildCompositeIntent(commands: DecodedCommand[], config: { separator?: string; maxDisplay?: number; overflow?: string } = {}): string {
+  if (commands.length === 0) return 'Execute commands';
+  const separator = config.separator ?? ' + ';
+  const intents = commands.map(cmd => cmd.intent);
+  if (config.maxDisplay && intents.length > config.maxDisplay) {
+    const shown = intents.slice(0, config.maxDisplay);
+    const overflow = config.overflow ?? `and ${intents.length - config.maxDisplay} more`;
+    return [...shown, overflow].join(separator);
+  }
+  return intents.join(separator);
 }
 
 export class SimpleInterface {
@@ -377,7 +435,7 @@ export function formatTokenAmount(rawValue: string, decimals: number, symbol: st
 /**
  * Resolve field path to value in params
  */
-function resolveFieldPath(pathStr: string, params: Record<string, unknown>): unknown {
+export function resolveFieldPath(pathStr: string, params: Record<string, unknown> | unknown): unknown {
   let currentPath = pathStr;
   if (currentPath.startsWith('#.') || currentPath.startsWith('@.')) {
     currentPath = currentPath.substring(2);
@@ -426,7 +484,15 @@ async function applyFieldFormat(
   const format = fieldSpec.format;
   const params = fieldSpec.params ?? {};
 
-  // tokenAmount format
+  // amount format with explicit metadata params, e.g. { format: 'amount', params: { decimals: 6, symbol: 'USDC' } }
+  if (format === 'amount') {
+    const valueStr = extractValueString(value);
+    const decimals = typeof params.decimals === 'number' ? params.decimals : Number(params.decimals ?? 0);
+    if (!Number.isFinite(decimals) || decimals < 0) return valueStr;
+    return formatTokenAmount(valueStr, decimals, '');
+  }
+
+  // tokenAmount format where token metadata is resolved from another decoded address field
   if (format === 'tokenAmount') {
     const tokenPath = params.tokenPath as string;
     if (!tokenPath) return String(value);
@@ -492,7 +558,8 @@ async function decodeCommandArray(
   commands: string,
   inputs: unknown[],
   registry: CommandRegistry,
-  chainId: number
+  chainId: number,
+  registryName?: string
 ): Promise<DecodedCommand[]> {
   if (!commands || !registry) return [];
 
@@ -548,14 +615,21 @@ async function decodeCommandArray(
         command: cmdByte,
         name: cmdDef.name,
         intent,
-        params: decodedParams
+        params: decodedParams,
+        inputRaw: inputData,
+        inputIndex: i / 2,
+        registryName,
+        recursive: cmdDef.recursive ?? cmdDef.recursiveRules
       });
     } else {
       results.push({
         command: cmdByte,
         name: `UNKNOWN_${cmdByte}`,
         intent: `Unknown command ${cmdByte}`,
-        params: {}
+        params: {},
+        inputRaw: inputData,
+        inputIndex: i / 2,
+        registryName
       });
     }
   }
@@ -593,6 +667,7 @@ export class TransactionDecoder {
 
       // Find function in ABI
       let functionSignature: string | null = null;
+      let legacyFunctionSignature: string | null = null;
       let functionName: string | null = null;
       let abiFunction: ABIEntry | null = null;
 
@@ -600,12 +675,15 @@ export class TransactionDecoder {
       if (abi && Array.isArray(abi)) {
         for (const item of abi) {
           if (item.type === 'function') {
-            const types = (item.inputs ?? []).map(input => input.type).join(',');
+            const types = (item.inputs ?? []).map(canonicalParamType).join(',');
+            const legacyTypes = (item.inputs ?? []).map(legacyParamType).join(',');
             const signature = `${item.name}(${types})`;
+            const legacySignature = `${item.name}(${legacyTypes})`;
             const expectedSelector = item.selector ?? SimpleInterface.calculateSelector(signature);
 
             if (expectedSelector === selector) {
               functionSignature = signature;
+              legacyFunctionSignature = legacySignature;
               functionName = item.name ?? null;
               abiFunction = item;
               break;
@@ -631,7 +709,12 @@ export class TransactionDecoder {
       let intent = 'Contract interaction';
       const fieldInfo: Record<string, FieldDefinition> = {};
       const formats = metadata.display?.formats ?? {};
-      const format = formats[functionSignature ?? ''] ?? formats[functionName ?? ''];
+      let format = formats[functionSignature ?? ''] ?? formats[legacyFunctionSignature ?? ''] ?? formats[functionName ?? ''];
+      if (!format && functionName) {
+        const prefix = `${functionName}(`;
+        const matchingKey = Object.keys(formats).find(key => key.startsWith(prefix));
+        if (matchingKey) format = formats[matchingKey];
+      }
 
       if (format) {
         if (format.interpolatedIntent) {
@@ -686,22 +769,49 @@ export class TransactionDecoder {
             params: fieldDef?.params
           };
         }
+
+        // ERC-7730 fields often point at tuple/array sub-paths (e.g. route.amountIn).
+        // Resolve and format those explicit metadata paths so intents can interpolate them.
+        for (const [fieldPath, fieldDef] of Object.entries(fieldInfo)) {
+          if (rawParams[fieldPath] !== undefined || formatted[fieldPath] !== undefined) continue;
+          const resolvedValue = resolveFieldPath(fieldPath, rawParams);
+          if (resolvedValue === undefined) continue;
+          const rawValue = extractValueString(resolvedValue);
+          const displayValue = await applyFieldFormat(resolvedValue, fieldDef, rawParams, chainId);
+          params[fieldPath] = rawValue;
+          formatted[fieldPath] = {
+            label: fieldDef.label ?? fieldPath,
+            value: displayValue,
+            rawValue,
+            format: fieldDef.format ?? 'raw',
+            params: fieldDef.params
+          };
+        }
       }
 
-      // Handle composite intents (command registries)
+      // Handle metadata-declared command registries only when display metadata explicitly
+      // identifies the command and input fields. Field names alone are not decode authority.
       let decodedCommands: DecodedCommand[] | undefined;
       const commandRegistries = metadata.commandRegistries;
+      const recursiveRules = [
+        ...(metadata.recursive ?? []),
+        ...(metadata.recursiveRules ?? []),
+        ...(format?.recursive ?? []),
+        ...(format?.recursiveRules ?? [])
+      ];
+      const compositeConfig = compositeIntentRule(format);
+      const commandRule = recursiveRules.find(rule => rule.type === 'commands' && rule.commandPath && rule.inputPath && rule.commandRegistry) ?? compositeConfig.rule;
 
-      if (commandRegistries && rawParams.commands) {
-        const commands = rawParams.commands as string;
-        const inputs = rawParams.inputs as unknown[];
-        const registryName = Object.keys(commandRegistries)[0];
+      if (commandRegistries && commandRule) {
+        const commands = resolveFieldPath(commandRule.commandPath!, rawParams) as string | undefined;
+        const inputs = resolveFieldPath(commandRule.inputPath!, rawParams) as unknown[] | undefined;
+        const registryName = commandRule.commandRegistry!;
         const registry = commandRegistries[registryName];
 
-        if (registry) {
-          decodedCommands = await decodeCommandArray(commands, inputs, registry, chainId);
+        if (registry && typeof commands === 'string' && Array.isArray(inputs)) {
+          decodedCommands = await decodeCommandArray(commands, inputs, registry, chainId, registryName);
           if (decodedCommands.length > 0) {
-            intent = decodedCommands.map(cmd => cmd.intent).join(' + ');
+            intent = buildCompositeIntent(decodedCommands, compositeConfig);
           }
         }
       }
@@ -709,8 +819,14 @@ export class TransactionDecoder {
       // Substitute template variables in intent
       if (intent.includes('{')) {
         intent = intent.replace(/\{([#@]?[\w.\[\]]+)(?::(\w+))?\}/g, (match, path) => {
-          const value = formatted[path]?.value ?? rawParams[path];
-          return value !== undefined ? String(value) : match;
+          const normalizedPath = String(path).replace(/^#\.|^@\./, '');
+          const value =
+            formatted[normalizedPath]?.value ??
+            formatted[path]?.value ??
+            rawParams[normalizedPath] ??
+            rawParams[path] ??
+            resolveFieldPath(normalizedPath, rawParams);
+          return value !== undefined ? extractValueString(value) : match;
         });
       }
 
@@ -724,7 +840,8 @@ export class TransactionDecoder {
         intent,
         formatted,
         metadata,
-        decodedCommands
+        decodedCommands,
+        recursiveRules
       };
     } catch (error) {
       return {

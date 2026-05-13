@@ -27,6 +27,15 @@ export interface ClearSignResult {
 
   /** Human-readable intent description */
   intent: string;
+  aggregatedIntent?: string;
+
+  /** Nested call summaries */
+  nestedCalls?: Array<{ target: string; selector: string; functionName?: string; intent: string; success: boolean }>;
+
+  /** Agent-safe decision fields */
+  fullyDecoded?: boolean;
+  requiresHumanReview?: boolean;
+  safeToAutonomouslySign?: boolean;
 
   /** Function being called */
   functionName: string;
@@ -47,7 +56,7 @@ export interface ClearSignResult {
 
   /** Verification details */
   verification?: {
-    source: 'leaf-verified' | 'api-only' | 'unverified' | 'error';
+    source: 'leaf-verified' | 'api-only' | 'unverified' | 'mismatch' | 'error';
     attestationUid?: string;
     metadataHash?: string;
   };
@@ -112,7 +121,8 @@ function buildDisplayText(
   value: string,
   to: string,
   chainId: number,
-  warnings: string[]
+  warnings: string[],
+  nestedCalls: ValidateBankrbotTxResult['nestedCalls'] = []
 ): string {
   const lines: string[] = [];
 
@@ -135,6 +145,17 @@ function buildDisplayText(
   const ethValue = formatEthValue(value);
   if (ethValue) {
     lines.push(`Value: ${ethValue}`);
+  }
+
+  // Nested calls
+  if (nestedCalls.length > 0) {
+    lines.push('');
+    lines.push('Nested calls:');
+    nestedCalls.forEach((call, index) => {
+      const fn = call.functionName || call.selector;
+      const status = call.success ? '' : ' [UNKNOWN/FAILED]';
+      lines.push(`${index + 1}. ${fn} on ${call.target}: ${call.intent}${status}`);
+    });
   }
 
   // Warnings
@@ -166,15 +187,16 @@ export async function getClearSignPrompt(input: ClearSignInput): Promise<ClearSi
   // Get verification badge
   const badge = getVerificationBadge(validation.source, validation.verified);
 
-  // Build display text
+  // Build display text from aggregated intent so nested calls are visible in CLI/agent logs.
   const displayText = buildDisplayText(
-    validation.intent,
+    validation.aggregatedIntent || validation.intent,
     validation.verified,
     badge,
     parsed.value,
     parsed.to,
     parsed.chainId,
-    validation.warnings
+    validation.warnings,
+    validation.nestedCalls
   );
 
   // Build result
@@ -183,6 +205,17 @@ export async function getClearSignPrompt(input: ClearSignInput): Promise<ClearSi
     verified: validation.verified,
     verificationBadge: badge,
     intent: validation.intent,
+    aggregatedIntent: validation.aggregatedIntent,
+    nestedCalls: validation.nestedCalls.map(call => ({
+      target: call.target,
+      selector: call.selector,
+      functionName: call.functionName,
+      intent: call.intent,
+      success: call.success
+    })),
+    fullyDecoded: validation.fullyDecoded,
+    requiresHumanReview: validation.requiresHumanReview,
+    safeToAutonomouslySign: validation.safeToAutonomouslySign,
     functionName: validation.transaction.functionName || 'unknown',
     warnings: validation.warnings,
     transaction: {

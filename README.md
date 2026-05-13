@@ -89,6 +89,8 @@ These contracts have on-chain attested metadata in the KaiSign Registry and can 
 
 ## Quick Start
 
+For the minimal command-line clear-signing tool, see [CLI.md](CLI.md). It supports pasted calldata (`--data` / `--calldata`), signed raw transactions (`--tx` / `--raw-tx`), and JSON stdin.
+
 ### Prerequisites
 
 - Node.js >= 18.0.0

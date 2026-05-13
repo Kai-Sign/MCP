@@ -11,6 +11,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { validateBankrbotTransaction } from '../src/tools/validate-bankrbot-tx.js';
 import { getClearSignPrompt } from '../src/tools/get-clear-sign-prompt.js';
 import { bankrbotClient } from '../src/services/bankrbot-client.js';
+import { cacheManager } from '../src/services/cache-manager.js';
 
 // Known verified contracts for testing
 const TEST_CONTRACTS = {
@@ -26,11 +27,76 @@ const TEST_CONTRACTS = {
   }
 };
 
+// Valid Universal Router execute(bytes,bytes[],uint256) calldata.
+// Commands are metadata-driven through commandRegistries; this is not selector-specific decoder logic.
+const VALID_UNIVERSAL_ROUTER_CALLDATA = '0x3593564c000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000065b8f70000000000000000000000000000000000000000000000000000000000000000020b000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000084b858183f00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000104b858183f00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000042c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20001f4a0b86991c6218b36c1d19d4a2e9eb480001f4dac17f958d2ee523a2206206994597c13d831ec700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000';
+
+function seedBaseUniversalRouterMetadata(): void {
+  cacheManager.setMetadata(TEST_CONTRACTS.UNISWAP_ROUTER_BASE.address.toLowerCase(), TEST_CONTRACTS.UNISWAP_ROUTER_BASE.chainId, {
+    context: {
+      contract: {
+        name: 'Uniswap Universal Router',
+        abi: [{
+          type: 'function',
+          name: 'execute',
+          inputs: [
+            { name: 'commands', type: 'bytes' },
+            { name: 'inputs', type: 'bytes[]' },
+            { name: 'deadline', type: 'uint256' }
+          ]
+        }]
+      }
+    },
+    display: {
+      formats: {
+        'execute(bytes,bytes[],uint256)': {
+          intent: {
+            type: 'composite',
+            registry: 'universalRouterCommands',
+            commandPath: 'commands',
+            inputPath: 'inputs',
+            separator: ' + '
+          },
+          recursive: [{ type: 'commands', commandRegistry: 'universalRouterCommands', commandPath: 'commands', inputPath: 'inputs' }]
+        }
+      }
+    },
+    commandRegistries: {
+      universalRouterCommands: {
+        '0x0b': {
+          name: 'WRAP_ETH',
+          intent: 'Wrap ETH to WETH',
+          inputs: [
+            { name: 'recipient', type: 'address' },
+            { name: 'amountMin', type: 'uint256' }
+          ]
+        },
+        '0x00': {
+          name: 'V3_SWAP_EXACT_IN',
+          intent: 'Swap exact input tokens',
+          inputs: [
+            { name: 'recipient', type: 'address' },
+            { name: 'amountIn', type: 'uint256' },
+            { name: 'amountOutMin', type: 'uint256' },
+            { name: 'path', type: 'bytes' },
+            { name: 'payerIsUser', type: 'bool' }
+          ]
+        }
+      }
+    },
+    _verification: {
+      verified: true,
+      source: 'leaf-verified',
+      details: 'test fixture metadata for deterministic Bankrbot clear-sign prompt intent tests'
+    }
+  });
+}
+
 describe('Bankrbot Transaction Validation', () => {
   describe('validateBankrbotTransaction', () => {
     it('validates a verified contract transaction', async () => {
-      // Sample swap calldata (execute with Universal Router)
-      const sampleCalldata = '0x3593564c00000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000066ff1b9f7d000000000000000000000000000000000000000000000000000000000000000000000000000000010800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000002386f26fc100000000000000000000000000000000000000000000000000000000000000b71b0000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000002b4200000000000000000000000000000000000006000bb8833589fcd6edb6e08f4c7c32d4f71b54bda02913000000000000000000000000000000000000000000';
+      seedBaseUniversalRouterMetadata();
+      const sampleCalldata = VALID_UNIVERSAL_ROUTER_CALLDATA;
 
       const result = await validateBankrbotTransaction({
         to: TEST_CONTRACTS.UNISWAP_ROUTER_BASE.address,
@@ -71,20 +137,27 @@ describe('Bankrbot Transaction Validation', () => {
       console.log('Unverified result:', JSON.stringify(result, null, 2));
     });
 
-    it('warns about risky selectors on unverified contracts', async () => {
-      // Approve selector on unverified contract
-      const approveCalldata = '0x095ea7b3000000000000000000000000deadbeef0000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffff';
+    it('treats selector-only unverified calldata as unsafe without naming it from hardcoded selectors', async () => {
+      // ERC-20 approve-shaped calldata on an unverified contract. Without verified metadata,
+      // the selector is only display evidence; runtime must not label it as approve.
+      const approveShapedCalldata = '0x095ea7b3000000000000000000000000deadbeef0000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffff';
 
       const result = await validateBankrbotTransaction({
         to: '0x1234567890123456789012345678901234567890',
-        data: approveCalldata,
+        data: approveShapedCalldata,
         chainId: 8453,
         value: '0'
       });
 
-      expect(result.warnings.some(w => w.includes('approve'))).toBe(true);
+      expect(result.verified).toBe(false);
+      expect(result.fullyDecoded).toBe(false);
+      expect(result.requiresHumanReview).toBe(true);
+      expect(result.safeToAutonomouslySign).toBe(false);
+      expect(result.transaction.selector).toBe('0x095ea7b3');
+      expect(result.warnings.some(w => /no verified metadata|cannot be independently verified|No metadata found/i.test(w))).toBe(true);
+      expect(result.warnings.some(w => /approve/i.test(w))).toBe(false);
 
-      console.log('Risky selector result:', JSON.stringify(result, null, 2));
+      console.log('Selector-only unverified result:', JSON.stringify(result, null, 2));
     });
 
     it('handles large ETH values with warning', async () => {
@@ -209,7 +282,7 @@ describe('Bankrbot Transaction Validation', () => {
     // NOTE: Bankrbot auto-executes transactions (signs + broadcasts immediately)
     // It does NOT return unsigned tx payloads for pre-signing validation.
     // These tests verify that Bankrbot successfully executes and returns tx hash.
-    it.skipIf(!hasApiKey)('executes swap and returns confirmation', async () => {
+    it.skipIf(!hasApiKey || !runBankrTests)('executes swap and returns confirmation', async () => {
       // This test actually executes a swap - Bankrbot doesn't have "build only" mode
       try {
         const result = await bankrbotClient.getTransaction(
@@ -235,7 +308,7 @@ describe('Bankrbot Transaction Validation', () => {
       }
     }, 120000);
 
-    it.skipIf(!hasApiKey)('end-to-end: executes swap via Bankrbot', async () => {
+    it.skipIf(!hasApiKey || !runBankrTests)('end-to-end: executes swap via Bankrbot', async () => {
       // This demonstrates the actual Bankrbot flow:
       // 1. Bankrbot receives prompt
       // 2. Bankrbot builds, signs, and broadcasts tx
