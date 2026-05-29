@@ -1,5 +1,7 @@
 # KaiSign MCP Server — Usage Guide
 
+Direct Bankrbot / LLM agent / wallet integration instructions are in [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md).
+
 This guide covers how to set up and use the KaiSign MCP Server with Bankrbot and deployed contracts.
 
 ## Table of Contents
@@ -190,10 +192,11 @@ The registry lives on Sepolia testnet:
 1. User tells Claude: "swap 0.01 ETH to USDC on Base"
 2. Claude calls Bankrbot API to build the transaction
 3. Bankrbot returns raw transaction payload (to, data, value, chainId)
-4. Claude calls `validate_bankrbot_transaction` with the payload
+4. Claude calls `clear_sign_payload` with the payload (`validate_bankrbot_transaction` also works for canonical tx objects)
 5. KaiSign verifies the contract on-chain and decodes the calldata
 6. Claude shows the user a clear signing prompt with verification badge
 7. User confirms or cancels
+8. If confirmed, sign and broadcast the returned original `transaction` through wallet/RPC/relay/any medium
 
 ### Example: Swap ETH to USDC
 
@@ -312,6 +315,21 @@ Validate a Bankrbot-built transaction. Combines verification + decoding + warnin
 | `chainId` | number | No | 8453 | Chain ID (default: Base) |
 | `value` | string | No | "0" | Value in wei |
 
+### clear_sign_payload
+
+Generic pre-sign hook for any transaction-builder payload: Bankrbot, an LLM agent, wallet, router API, or custom code. Accepts direct canonical tx fields, nested `transaction` / `tx` objects, calldata aliases, or `rawTx`, then returns normalized `transaction`, `clearSign`, and `signingPolicy`.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `to` | string | Conditional | — | Target contract address for direct payloads |
+| `data` / `calldata` | string | Conditional | — | Transaction calldata for direct/nested payloads |
+| `chainId` / `chain` | number/string | No | 1 | Chain ID |
+| `value` | string | No | "0" | Value in wei |
+| `transaction` / `tx` | object | Conditional | — | Nested tx-builder payload |
+| `rawTx` / `rawTransaction` | string | Conditional | — | Serialized transaction to extract clear-sign fields |
+
+Use this before signing/broadcasting. Sign only the returned `transaction` after policy/user approval.
+
 ### get_clear_sign_prompt
 
 Get a formatted signing prompt for user display.
@@ -371,7 +389,7 @@ Ask Claude: "Swap 0.5 ETH for USDC on Base"
 
 Claude will:
 1. Call Bankrbot to build the swap transaction
-2. Call `validate_bankrbot_transaction` to verify and decode
+2. Call `clear_sign_payload` to verify, decode, and produce the user display/signing policy
 3. Show you the verified intent
 4. Ask for confirmation before signing
 

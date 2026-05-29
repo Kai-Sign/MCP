@@ -18,9 +18,10 @@ import { decodeTransaction, decodeTransactionSchema } from './tools/decode-trans
 import { getCachedMetadata, getCachedMetadataSchema, clearCache, pruneExpiredCache } from './tools/get-cached-metadata.js';
 import { validateBankrbotTransaction, validateBankrbotTxSchema } from './tools/validate-bankrbot-tx.js';
 import { getClearSignPrompt, getClearSignPromptSchema } from './tools/get-clear-sign-prompt.js';
+import { clearSignPayload, clearSignPayloadSchema } from './tools/clear-sign-payload.js';
 
 // Create MCP server
-const server = new Server(
+export const server = new Server(
   {
     name: 'kaisign-mcp',
     version: '1.0.0'
@@ -33,7 +34,7 @@ const server = new Server(
 );
 
 // Define tools
-const tools = [
+export const mcpTools = [
   {
     name: 'verify_contract_metadata',
     description: `Verify contract metadata against on-chain KaiSign Registry.
@@ -205,6 +206,67 @@ Returns:
     }
   },
   {
+    name: 'clear_sign_payload',
+    description: `Clear-sign any transaction payload from a transaction builder: Bankrbot, an LLM agent, wallet request, router API, custom code, or raw transaction.
+
+This is the generic pre-sign hook for transaction builders:
+1. Accepts a direct transaction {to,data,value,chainId}, nested {transaction:{...}} / {tx:{...}}, calldata aliases, or rawTx
+2. Normalizes it to the exact original transaction payload that must be signed
+3. Calls KaiSign clear-signing verification and decoding
+4. Returns displayText, intent, verification status, warnings, safe/autonomous decision fields, and signing policy
+
+Use this before any signing or broadcasting. Sign the returned transaction only after user/agent policy approval.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: {
+          type: 'string',
+          description: 'Target contract address (direct payload shape)',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        },
+        data: {
+          type: 'string',
+          description: 'Transaction calldata (direct payload shape)',
+          pattern: '^0x[a-fA-F0-9]+$'
+        },
+        calldata: {
+          type: 'string',
+          description: 'Alias for data'
+        },
+        chainId: {
+          type: 'number',
+          description: 'Chain ID',
+          default: 8453
+        },
+        chain: {
+          description: 'Alias for chainId; accepts number or numeric string'
+        },
+        value: {
+          type: 'string',
+          description: 'Transaction value in wei',
+          default: '0'
+        },
+        transaction: {
+          type: 'object',
+          description: 'Nested tx-builder payload containing to/data/value/chainId'
+        },
+        tx: {
+          type: 'object',
+          description: 'Nested tx-builder payload containing to/data/value/chainId'
+        },
+        rawTx: {
+          type: 'string',
+          description: 'Serialized signed/raw Ethereum transaction hex; used only to extract to/data/value/chainId for display'
+        },
+        rawTransaction: {
+          type: 'string',
+          description: 'Alias for rawTx'
+        }
+      },
+      additionalProperties: true
+    }
+  },
+  {
     name: 'get_clear_sign_prompt',
     description: `Get a clear signing prompt for user confirmation.
 
@@ -253,7 +315,7 @@ Use this when presenting transactions to users for signing. The response include
 
 // Handle list tools request
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools };
+  return { tools: mcpTools };
 });
 
 // Handle tool calls
@@ -338,6 +400,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case 'clear_sign_payload': {
+        const input = clearSignPayloadSchema.parse(args);
+        const result = await clearSignPayload(input);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
       case 'get_clear_sign_prompt': {
         const input = getClearSignPromptSchema.parse(args);
         const result = await getClearSignPrompt(input);
@@ -371,7 +446,9 @@ async function main() {
   console.error('KaiSign MCP Server running on stdio');
 }
 
-main().catch((error) => {
-  console.error('Failed to start server:', error);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  });
+}

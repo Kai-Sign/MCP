@@ -89,6 +89,8 @@ These contracts have on-chain attested metadata in the KaiSign Registry and can 
 
 ## Quick Start
 
+For direct Bankrbot / LLM agent / wallet integration instructions, see [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md).
+
 For the minimal command-line clear-signing tool, see [CLI.md](CLI.md). It supports pasted calldata (`--data` / `--calldata`), signed raw transactions (`--tx` / `--raw-tx`), and JSON stdin.
 
 ### Prerequisites
@@ -252,9 +254,48 @@ Input: {
 }
 ```
 
-### Tool 4: Get Clear Sign Prompt
+### Tool 4: Clear Sign Any Tx-Builder Payload
 
-Get a formatted signing prompt for user confirmation with verification badges.
+Generic pre-sign hook for any transaction builder: Bankrbot, an LLM agent, a wallet, a router API, or custom code. Use this when the builder returns direct `{to,data,value,chainId}`, nested `{transaction:{...}}` / `{tx:{...}}`, calldata aliases, or a serialized raw transaction.
+
+```
+Tool: clear_sign_payload
+Input: {
+  "transaction": {
+    "to": "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD",
+    "calldata": "0x3593564c...",
+    "chain": "8453",
+    "value": "10000000000000000"
+  }
+}
+```
+
+**Response shape:**
+```json
+{
+  "transaction": { "to": "0x...", "data": "0x...", "value": "...", "chainId": 8453 },
+  "clearSign": {
+    "displayText": "✓ Verified Transaction\n\nSwap ...",
+    "verified": true,
+    "fullyDecoded": true,
+    "requiresHumanReview": false,
+    "safeToAutonomouslySign": true,
+    "warnings": [],
+    "verification": { "source": "leaf-verified" }
+  },
+  "signingPolicy": {
+    "signOriginalTransactionOnly": true,
+    "canAutonomouslySign": true,
+    "mustShowToUser": false
+  }
+}
+```
+
+Sign/broadcast only the returned `transaction`, after user/agent policy approval. KaiSign does not modify or sign the transaction.
+
+### Tool 5: Get Clear Sign Prompt
+
+Lower-level direct-payload formatter for user confirmation with verification badges. Use when you already have canonical `{to,data,chainId,value}`.
 
 ```
 Tool: get_clear_sign_prompt
@@ -281,7 +322,7 @@ Input: {
 └─────────────────────────────────────────┘
 ```
 
-### Tool 5: Cache Management
+### Tool 6: Cache Management
 
 ```
 # Check cache status for a contract
@@ -303,19 +344,21 @@ Tool: prune_expired_cache
 
 1. **User says:** "swap 0.01 ETH to USDC on Base"
 2. **Bankrbot** builds the unsigned transaction (calldata, target contract, value)
-3. **KaiSign MCP** verifies the contract against the on-chain registry
-4. **KaiSign MCP** decodes the calldata into human-readable intent
-5. **User sees:** "Swap 0.01 ETH → min 25.50 USDC via Uniswap Universal Router ✓ Verified"
-6. **User confirms** and signs the transaction
+3. **KaiSign MCP** clear-signs the built payload via `clear_sign_payload` (or `get_clear_sign_prompt` for canonical tx shape)
+4. **KaiSign MCP** verifies the contract against the on-chain registry
+5. **KaiSign MCP** decodes the calldata into human-readable intent
+6. **User sees:** "Swap 0.01 ETH → min 25.50 USDC via Uniswap Universal Router ✓ Verified"
+7. **User confirms** and signs the original transaction
+8. **Signed tx is broadcast** through wallet/RPC/relay/any medium
 
 ### Autonomous Agent Flow
 
 The same flow works without user confirmation — the LLM verifies and decides on its own:
 
-1. **LLM** sends prompt to Bankrbot → receives unsigned transaction payload
-2. **LLM** calls KaiSign MCP → verifies contract metadata on-chain + decodes intent
-3. **LLM** checks: `verified: true`, no warnings, intent matches original request
-4. **LLM** proceeds or halts based on verification result
+1. **A transaction builder** (Bankrbot, an LLM agent, wallet, router API, or custom code) builds unsigned tx payload from the request
+2. **The caller** calls `clear_sign_payload` on KaiSign MCP → verifies contract metadata on-chain + decodes intent
+3. **The caller** checks: `clearSign.verified: true`, `clearSign.fullyDecoded: true`, no warnings, intent matches original request
+4. **The caller** proceeds to sign/broadcast the returned `transaction`, or halts based on verification/policy result
 
 ```
 LLM prompt: "swap 0.01 ETH to USDC on Base"
@@ -386,6 +429,7 @@ src/
     ├── verify-metadata.ts        # verify_contract_metadata tool
     ├── decode-transaction.ts     # decode_transaction tool
     ├── validate-bankrbot-tx.ts   # validate_bankrbot_transaction tool
+    ├── clear-sign-payload.ts     # clear_sign_payload generic tx-builder pre-sign hook
     ├── get-clear-sign-prompt.ts  # get_clear_sign_prompt tool
     └── get-cached-metadata.ts    # Cache management tools
 ```
