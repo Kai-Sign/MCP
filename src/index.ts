@@ -313,117 +313,56 @@ Use this when presenting transactions to users for signing. The response include
   }
 ];
 
-// Handle list tools request
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: mcpTools };
-});
+function textResult(result: unknown) {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }
+    ]
+  };
+}
 
-// Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
+export async function handleMcpToolCall(name: string, args: unknown) {
   try {
     switch (name) {
       case 'verify_contract_metadata': {
         const input = verifyMetadataSchema.parse(args);
-        const result = await verifyContractMetadata(input);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        return textResult(await verifyContractMetadata(input));
       }
 
       case 'decode_transaction': {
         const input = decodeTransactionSchema.parse(args);
-        const result = await decodeTransaction(input);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        return textResult(await decodeTransaction(input));
       }
 
       case 'get_cached_metadata': {
         const input = getCachedMetadataSchema.parse(args);
-        const result = await getCachedMetadata(input);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        return textResult(await getCachedMetadata(input));
       }
 
       case 'clear_cache': {
-        const result = await clearCache();
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        return textResult(await clearCache());
       }
 
       case 'prune_expired_cache': {
-        const result = await pruneExpiredCache();
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        return textResult(await pruneExpiredCache());
       }
 
       case 'validate_bankrbot_transaction': {
         const input = validateBankrbotTxSchema.parse(args);
-        const result = await validateBankrbotTransaction(input);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        return textResult(await validateBankrbotTransaction(input));
       }
 
       case 'clear_sign_payload': {
         const input = clearSignPayloadSchema.parse(args);
-        const result = await clearSignPayload(input);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        return textResult(await clearSignPayload(input));
       }
 
       case 'get_clear_sign_prompt': {
         const input = getClearSignPromptSchema.parse(args);
-        const result = await getClearSignPrompt(input);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        return textResult(await getClearSignPrompt(input));
       }
 
       default:
@@ -437,6 +376,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const message = error instanceof Error ? error.message : 'Unknown error';
     throw new McpError(ErrorCode.InternalError, message);
   }
+}
+
+// Handle list tools request
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return { tools: mcpTools };
+});
+
+// Handle tool calls
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+  return handleMcpToolCall(name, args);
 });
 
 // Start server
