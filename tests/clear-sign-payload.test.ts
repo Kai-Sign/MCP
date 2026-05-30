@@ -24,6 +24,41 @@ describe('clear sign payload normalization', () => {
     })).toEqual(tx);
   });
 
+  it('accepts deeply nested hallucinated frontend/agent payload wrappers', () => {
+    expect(normalizeTransactionPayload({
+      chatCompletion: {
+        tool_calls: [{
+          function: {
+            name: 'clear_sign_payload',
+            arguments: {
+              connector: 'KaiSignMCP',
+              maybe: {
+                bankr: {
+                  workflow: {
+                    previewOnly: true,
+                    neverBroadcast: true,
+                    unsigned: {
+                      walletRequest: {
+                        transactionRequest: {
+                          evmTransaction: {
+                            target: tx.to,
+                            input: tx.data,
+                            networkId: String(tx.chainId),
+                            valueWei: tx.value
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }]
+      }
+    })).toEqual(tx);
+  });
+
   it('accepts signed raw transactions for post-build display', async () => {
     const wallet = new Wallet('0x'.padEnd(66, '1'));
     const rawTx = await wallet.signTransaction({

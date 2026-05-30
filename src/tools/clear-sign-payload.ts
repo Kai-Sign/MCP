@@ -51,12 +51,75 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+const NESTED_PAYLOAD_KEYS = [
+  'transaction',
+  'tx',
+  'unsignedTransaction',
+  'unsignedTx',
+  'request',
+  'payload',
+  'params',
+  'arguments',
+  'args',
+  'body',
+  'draft',
+  'prepared',
+  'preparedTransaction',
+  'evmTransaction',
+  'transactionRequest',
+  'walletRequest',
+  'signingRequest'
+];
+
+function hasTransactionFields(input: Record<string, unknown>): boolean {
+  const hasTo = input.to !== undefined || input.target !== undefined || input.contractAddress !== undefined;
+  const hasData = input.data !== undefined || input.calldata !== undefined || input.input !== undefined;
+  const hasRaw = rawTxFrom(input) !== undefined;
+  return hasRaw || (hasTo && hasData);
+}
+
 function nestedPayload(input: unknown): Record<string, unknown> {
   if (!isRecord(input)) throw new Error('transaction payload must be an object');
+  if (hasTransactionFields(input)) return input;
 
-  for (const key of ['transaction', 'tx', 'unsignedTransaction', 'unsignedTx', 'request']) {
-    const nested = input[key];
-    if (isRecord(nested)) return nested;
+  const queue: Record<string, unknown>[] = [input];
+  const seen = new Set<Record<string, unknown>>();
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+
+    for (const key of NESTED_PAYLOAD_KEYS) {
+      const nested = current[key];
+      if (isRecord(nested)) {
+        if (hasTransactionFields(nested)) return nested;
+        queue.push(nested);
+      } else if (Array.isArray(nested)) {
+        for (const item of nested) {
+          if (isRecord(item)) {
+            if (hasTransactionFields(item)) return item;
+            queue.push(item);
+          }
+        }
+      }
+    }
+
+    // Last-resort support for LLM/UI wrappers with arbitrary names. Keep this breadth-first
+    // so shallow canonical fields win over unrelated deep objects.
+    for (const value of Object.values(current)) {
+      if (isRecord(value)) {
+        if (hasTransactionFields(value)) return value;
+        queue.push(value);
+      } else if (Array.isArray(value)) {
+        for (const item of value) {
+          if (isRecord(item)) {
+            if (hasTransactionFields(item)) return item;
+            queue.push(item);
+          }
+        }
+      }
+    }
   }
 
   return input;
