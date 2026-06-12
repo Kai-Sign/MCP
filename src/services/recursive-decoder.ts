@@ -24,6 +24,14 @@ export interface RecursiveCallNode {
   cycleDetected?: boolean;
 }
 
+export interface ContractUsage {
+  address: string;
+  chainId: number;
+  name?: string;
+  calls: number;
+  decoded: boolean;
+}
+
 export interface RecursiveDecodeResult {
   success: boolean;
   verified: boolean;
@@ -39,6 +47,9 @@ export interface RecursiveDecodeResult {
   cycleDetected: boolean;
   hasUnknownInnerCalls: boolean;
   hasUnverifiedMetadata: boolean;
+  totalCalls: number;
+  decodedCalls: number;
+  contracts: ContractUsage[];
 }
 
 interface RecursiveDecoderOptions {
@@ -54,6 +65,9 @@ interface DecodeContext {
   cycleDetected: boolean;
   hasUnknownInnerCalls: boolean;
   hasUnverifiedMetadata: boolean;
+  totalCalls: number;
+  decodedCalls: number;
+  contracts: Map<string, ContractUsage>;
 }
 
 function normalizeAddress(address: string): string {
@@ -93,12 +107,24 @@ function isVerified(decoded: DecodedTransaction): boolean {
 function getDisplayFormat(decoded: DecodedTransaction) {
   const metadata = decoded.metadata as ContractMetadata | undefined;
   const formats = metadata?.display?.formats ?? {};
-  return formats[decoded.function ?? ''] ?? formats[decoded.functionName ?? ''];
+  return formats[decoded.selector] ?? formats[decoded.function ?? ''] ?? formats[decoded.functionName ?? ''];
 }
 
 function getRecursiveRules(decoded: DecodedTransaction): RecursiveRule[] {
   const metadata = decoded.metadata as ContractMetadata | undefined;
+  const format = getDisplayFormat(decoded);
+  const calldataFieldRules = (format?.fields ?? [])
+    .filter(field => field.format === 'calldata')
+    .map(field => ({
+      type: 'fieldCalldata',
+      calldataPath: field.path,
+      targetPath: typeof field.params?.calleePath === 'string' ? field.params.calleePath : undefined,
+      valuePath: typeof field.params?.amountPath === 'string' ? field.params.amountPath : undefined,
+      chainIdPath: typeof field.params?.chainIdPath === 'string' ? field.params.chainIdPath : undefined
+    }));
+
   return [
+    ...calldataFieldRules,
     ...(metadata?.recursive ?? []),
     ...(metadata?.recursiveRules ?? []),
     ...(decoded.recursiveRules ?? [])
@@ -134,11 +160,42 @@ function pushWarning(ctx: DecodeContext, node: RecursiveCallNode, message: strin
   node.warnings.push(message);
 }
 
+function contractName(decoded: DecodedTransaction): string | undefined {
+  const metadata = decoded.metadata as ContractMetadata | undefined;
+  const meta = metadata as unknown as {
+    metadata?: { owner?: string; name?: string };
+    context?: { contract?: { name?: string } };
+  } | undefined;
+  return meta?.context?.contract?.name ?? meta?.metadata?.name ?? meta?.metadata?.owner;
+}
+
+function recordContractUsage(ctx: DecodeContext, decoded: DecodedTransaction, target: string, chainId: number) {
+  ctx.totalCalls++;
+  if (decoded.success) ctx.decodedCalls++;
+
+  const key = `${chainId}:${target}`;
+  const existing = ctx.contracts.get(key);
+  if (existing) {
+    existing.calls++;
+    existing.decoded = existing.decoded && decoded.success;
+    existing.name = existing.name ?? contractName(decoded);
+  } else {
+    ctx.contracts.set(key, {
+      address: target,
+      chainId,
+      name: contractName(decoded),
+      calls: 1,
+      decoded: decoded.success
+    });
+  }
+}
+
 export class RecursiveCalldataDecoder {
   private maxDepth: number;
 
   constructor(options: RecursiveDecoderOptions = {}) {
-    this.maxDepth = options.maxDepth ?? 5;
+    const envDepth = process.env.KAISIGN_RECURSIVE_MAX_DEPTH ? Number(process.env.KAISIGN_RECURSIVE_MAX_DEPTH) : undefined;
+    this.maxDepth = options.maxDepth ?? (Number.isFinite(envDepth) && envDepth! >= 0 ? envDepth! : 128);
   }
 
   async decode(data: string, target: string, chainId: number, value?: string): Promise<RecursiveDecodeResult> {
@@ -150,7 +207,10 @@ export class RecursiveCalldataDecoder {
       truncated: false,
       cycleDetected: false,
       hasUnknownInnerCalls: false,
-      hasUnverifiedMetadata: false
+      hasUnverifiedMetadata: false,
+      totalCalls: 0,
+      decodedCalls: 0,
+      contracts: new Map()
     };
 
     const callTree = await this.decodeNode(data, normalizeAddress(target), chainId, value, 0, [], ctx, false);
@@ -171,7 +231,10 @@ export class RecursiveCalldataDecoder {
       truncated: ctx.truncated,
       cycleDetected: ctx.cycleDetected,
       hasUnknownInnerCalls: ctx.hasUnknownInnerCalls,
-      hasUnverifiedMetadata: ctx.hasUnverifiedMetadata
+      hasUnverifiedMetadata: ctx.hasUnverifiedMetadata,
+      totalCalls: ctx.totalCalls,
+      decodedCalls: ctx.decodedCalls,
+      contracts: [...ctx.contracts.values()]
     };
   }
 
@@ -186,7 +249,7 @@ export class RecursiveCalldataDecoder {
     isNested: boolean
   ): Promise<RecursiveCallNode> {
     const selector = data.slice(0, 10).toLowerCase();
-    const stackKey = `${target}:${selector}`;
+    const stackKey = `${target}:${selector}:${data.toLowerCase()}`;
 
     if (depth > this.maxDepth) {
       ctx.truncated = true;
@@ -237,6 +300,7 @@ export class RecursiveCalldataDecoder {
     }
 
     const node = makeNode(decoded, target, chainId, value);
+    recordContractUsage(ctx, decoded, normalizeAddress(target), chainId);
     if (isNested) {
       ctx.nestedCalls.push(node);
       if (decoded.success && decoded.intent) ctx.nestedIntents.push(decoded.intent);
@@ -253,8 +317,9 @@ export class RecursiveCalldataDecoder {
     }
 
     if (decoded.success && !node.verified) {
+      // Registry attestation status is reported once per contract in the
+      // result's contracts summary, not as a per-call warning.
       ctx.hasUnverifiedMetadata = true;
-      if (isNested) pushWarning(ctx, node, `Unverified metadata for inner call at ${target} ${selector}`);
     }
 
     const nextStack = [...stack, stackKey];
@@ -281,8 +346,8 @@ export class RecursiveCalldataDecoder {
     depth: number,
     ctx: DecodeContext
   ) {
-    if (rule.type === 'calldata') {
-      await this.decodeSingleFromContainer(rule, decoded.rawParams, node, defaultChainId, stack, depth, ctx);
+    if (rule.type === 'calldata' || rule.type === 'fieldCalldata') {
+      await this.decodeCalldataField(rule, decoded.rawParams, node, defaultChainId, stack, depth, ctx);
       return;
     }
 
@@ -293,6 +358,11 @@ export class RecursiveCalldataDecoder {
       for (const call of calls) {
         await this.decodeSingleFromContainer(rule, call, node, defaultChainId, stack, depth, ctx);
       }
+      return;
+    }
+
+    if (rule.type === 'parallelCalls') {
+      await this.decodeParallelArrays(rule, decoded.rawParams, node, defaultChainId, stack, depth, ctx);
       return;
     }
 
@@ -308,6 +378,82 @@ export class RecursiveCalldataDecoder {
           pushWarning(ctx, node, `Unknown metadata command ${command.command} at ${node.target} ${node.selector}`);
         }
       }
+    }
+  }
+
+  private resolveIndexedPath(path: string | undefined, params: Record<string, unknown>, index: number): unknown {
+    if (!path) return undefined;
+    return resolveFieldPath(path.replace(/\[\]/g, `[${index}]`), params);
+  }
+
+  private async decodeCalldataField(
+    rule: RecursiveRule,
+    params: Record<string, unknown>,
+    parent: RecursiveCallNode,
+    defaultChainId: number,
+    stack: string[],
+    depth: number,
+    ctx: DecodeContext
+  ) {
+    if (!rule.calldataPath) return;
+
+    if (rule.calldataPath.includes('[]')) {
+      const pathForArray = rule.calldataPath.replace(/\.\[\].*$/, '').replace(/\[\].*$/, '');
+      const values = resolveFieldPath(pathForArray, params);
+      if (!Array.isArray(values)) return;
+
+      for (let i = 0; i < values.length; i++) {
+        const calldata = resolveFieldPath(rule.calldataPath.replace(/\[\]/g, `[${i}]`), params);
+        if (!isHexCalldata(calldata)) continue;
+        const target = stringifyValue(this.resolveIndexedPath(rule.targetPath, params, i))?.toLowerCase() ?? parent.target;
+        const value = stringifyValue(this.resolveIndexedPath(rule.valuePath, params, i));
+        const chainIdValue = stringifyValue(this.resolveIndexedPath(rule.chainIdPath, params, i));
+        const chainId = chainIdValue ? Number(chainIdValue) : defaultChainId;
+        const child = await this.decodeNode(calldata, target, chainId, value, depth + 1, stack, ctx, true);
+        parent.children.push(child);
+      }
+      return;
+    }
+
+    await this.decodeSingleFromContainer(rule, params, parent, defaultChainId, stack, depth, ctx);
+  }
+
+  private async decodeParallelArrays(
+    rule: RecursiveRule,
+    params: Record<string, unknown>,
+    parent: RecursiveCallNode,
+    defaultChainId: number,
+    stack: string[],
+    depth: number,
+    ctx: DecodeContext
+  ) {
+    if (!rule.calldataPath || !rule.targetPath) return;
+
+    const calldatas = resolveFieldPath(rule.calldataPath, params);
+    const targets = resolveFieldPath(rule.targetPath, params);
+    const values = rule.valuePath ? resolveFieldPath(rule.valuePath, params) : undefined;
+    const chainIds = rule.chainIdPath ? resolveFieldPath(rule.chainIdPath, params) : undefined;
+
+    if (!Array.isArray(calldatas) || !Array.isArray(targets)) return;
+
+    const count = Math.min(calldatas.length, targets.length);
+    if (calldatas.length !== targets.length || (Array.isArray(values) && values.length !== count) || (Array.isArray(chainIds) && chainIds.length !== count)) {
+      const message = `Parallel recursive call arrays length mismatch at ${parent.target} ${parent.selector}`;
+      ctx.errors.push(message);
+      pushWarning(ctx, parent, message);
+    }
+
+    for (let i = 0; i < count; i++) {
+      const calldata = calldatas[i];
+      if (!isHexCalldata(calldata)) continue;
+
+      const target = stringifyValue(targets[i])?.toLowerCase() ?? parent.target;
+      const value = Array.isArray(values) ? stringifyValue(values[i]) : undefined;
+      const chainIdValue = Array.isArray(chainIds) ? stringifyValue(chainIds[i]) : undefined;
+      const chainId = chainIdValue ? Number(chainIdValue) : defaultChainId;
+
+      const child = await this.decodeNode(calldata, target, chainId, value, depth + 1, stack, ctx, true);
+      parent.children.push(child);
     }
   }
 

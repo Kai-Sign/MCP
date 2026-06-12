@@ -54,6 +54,7 @@ User prompt: "swap 0.01 ETH to USDC"
 - **Transaction decoding** — Raw calldata decoded into human-readable intent using ERC-7730 metadata
 - **Bankrbot integration** — Validate transactions built by [Bankrbot](https://bankr.bot) from natural language
 - **Clear signing prompts** — Formatted transaction confirmations with verification badges
+- **Selector lookup for builders** — Agents can fetch canonical function signatures/selectors by exact address + chain before encoding, instead of relying on model memory
 - **Multi-chain support** — Ethereum, Base, Optimism, Arbitrum, and Sepolia
 - **Proxy detection** — Automatic resolution of EIP-1967, Diamond, and Safe proxy contracts
 - **Smart caching** — TTL-based caching for metadata and token info, reducing redundant RPC calls
@@ -89,9 +90,11 @@ These contracts have on-chain attested metadata in the KaiSign Registry and can 
 
 ## Quick Start
 
+For a step-by-step local MCP setup, smoke test, Claude config, and optional HTTP/tunnel setup, see [docs/LOCAL_MCP_TUTORIAL.md](docs/LOCAL_MCP_TUTORIAL.md).
+
 For direct Bankrbot / LLM agent / wallet integration instructions, see [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md).
 
-For the minimal command-line clear-signing tool, see [CLI.md](CLI.md). It supports pasted calldata (`--data` / `--calldata`), signed raw transactions (`--tx` / `--raw-tx`), and JSON stdin.
+For the minimal command-line clear-signing tool, see [docs/CLI.md](docs/CLI.md). It supports pasted calldata (`--data` / `--calldata`), signed raw transactions (`--tx` / `--raw-tx`), and JSON stdin.
 
 ### Prerequisites
 
@@ -293,7 +296,42 @@ Input: {
 
 Sign/broadcast only the returned `transaction`, after user/agent policy approval. KaiSign does not modify or sign the transaction.
 
-### Tool 5: Get Clear Sign Prompt
+### Tool 5: Get Function Selectors
+
+Resolve canonical function signatures/selectors from KaiSign metadata for one exact target address and chain before encoding calldata.
+
+This exists because agents can hallucinate selectors from training data. In one real test, Claude Sonnet 4.6 encoded Alchemy LightAccount V2 `executeBatch` as `executeBatch((address,uint256,bytes)[])` (`0x34fcd5be`) by relying on remembered smart-account patterns. That selector belongs to other account implementations, not the Alchemy LightAccount V2 contract at `0x8E8e658E22B12ada97B402fF0b044D6A325013C7`. The correct ABI entry for that address on mainnet is `executeBatch(address[] dest,uint256[] value,bytes[] func)` (`0x47e1da2a`).
+
+Builder UX: users should be able to provide only chainId, contracts, and desired actions. The MCP tool descriptions tell agents that this is enough context to produce an unsigned transaction. Agents should use `get_function_selectors` automatically for each target contract they plan to encode, choose any realistic call path/nesting whose selectors exist on those exact contracts, call `clear_sign_payload` on the final unsigned transaction, and output only `to`, `data`, `value`, and `chainId` unless the caller asks for more.
+
+```
+Tool: get_function_selectors
+Input: {
+  "contractAddress": "0x8E8e658E22B12ada97B402fF0b044D6A325013C7",
+  "chainId": 1,
+  "functionName": "executeBatch"
+}
+```
+
+**Response shape:**
+```json
+{
+  "contractAddress": "0x8e8e658e22b12ada97b402ff0b044d6a325013c7",
+  "chainId": 1,
+  "contractName": "Alchemy LightAccount V2",
+  "found": true,
+  "functions": [
+    {
+      "name": "executeBatch",
+      "signature": "executeBatch(address[],uint256[],bytes[])",
+      "selector": "0x47e1da2a",
+      "displayFormat": true
+    }
+  ]
+}
+```
+
+### Tool 6: Get Clear Sign Prompt
 
 Lower-level direct-payload formatter for user confirmation with verification badges. Use when you already have canonical `{to,data,chainId,value}`.
 
@@ -322,7 +360,7 @@ Input: {
 └─────────────────────────────────────────┘
 ```
 
-### Tool 6: Cache Management
+### Tool 7: Cache Management
 
 ```
 # Check cache status for a contract
@@ -430,6 +468,7 @@ src/
     ├── decode-transaction.ts     # decode_transaction tool
     ├── validate-bankrbot-tx.ts   # validate_bankrbot_transaction tool
     ├── clear-sign-payload.ts     # clear_sign_payload generic tx-builder pre-sign hook
+    ├── get-function-selectors.ts # get_function_selectors exact-address ABI selector lookup
     ├── get-clear-sign-prompt.ts  # get_clear_sign_prompt tool
     └── get-cached-metadata.ts    # Cache management tools
 ```
@@ -484,7 +523,7 @@ BANKR_API_KEY=your_key BANKR_TEST=1 npm run test:run
 |----------|----------|---------|-------------|
 | `BANKR_API_KEY` | For Bankrbot | — | Bankrbot API key |
 | `BANKR_API_URL` | No | `https://api.bankr.bot` | Bankrbot API endpoint |
-| `KAISIGN_API_URL` | No | `https://kai-sign-production.up.railway.app` | KaiSign API endpoint |
+| `KAISIGN_METADATA_DIR` | No | auto-detects repo-local `metadata/` | Local ERC-7730 metadata directory |
 | `ETH_RPC_URL` | No | Public RPC | Ethereum Mainnet RPC |
 | `BASE_RPC_URL` | No | Public RPC | Base RPC |
 | `OPTIMISM_RPC_URL` | No | Public RPC | Optimism RPC |

@@ -3,7 +3,7 @@
  * Human CLI test for KaiSign MCP clear_sign_payload.
  *
  * Default sample is a legit USDC transfer built from:
- *   ../kaisign-backend/backend/metadata/tokens/usdc.json
+ *   metadata/tokens/usdc.json
  *
  * Usage:
  *   npm run build
@@ -19,7 +19,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const DEFAULT_PAYLOAD = {
-  // USD Coin, from ../kaisign-backend/backend/metadata/tokens/usdc.json
+  // USD Coin, from metadata/tokens/usdc.json
   to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
   // transfer(address,uint256)
   // recipient: 0x2222222222222222222222222222222222222222

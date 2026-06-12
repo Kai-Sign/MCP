@@ -5,6 +5,7 @@
 
 import { z } from 'zod';
 import { validateBankrbotTransaction, type ValidateBankrbotTxResult } from './validate-bankrbot-tx.js';
+import { renderCallTree, renderStatusLines, type ContractSummary, type SigningStatus } from './signing-policy.js';
 
 export const getClearSignPromptSchema = z.object({
   to: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
@@ -31,6 +32,11 @@ export interface ClearSignResult {
 
   /** Nested call summaries */
   nestedCalls?: Array<{ target: string; selector: string; functionName?: string; intent: string; success: boolean }>;
+  nestedIntents?: string[];
+
+  /** Unified signing verdict shared by all KaiSign tools */
+  signing?: SigningStatus;
+  contracts?: ContractSummary[];
 
   /** Agent-safe decision fields */
   fullyDecoded?: boolean;
@@ -56,7 +62,7 @@ export interface ClearSignResult {
 
   /** Verification details */
   verification?: {
-    source: 'leaf-verified' | 'api-only' | 'unverified' | 'mismatch' | 'error';
+    source: 'leaf-verified' | 'local-metadata' | 'unverified' | 'mismatch' | 'error';
     attestationUid?: string;
     metadataHash?: string;
   };
@@ -105,8 +111,8 @@ function getVerificationBadge(source: ValidateBankrbotTxResult['source'], verifi
   if (verified && source === 'leaf-verified') {
     return '✓ Verified';
   }
-  if (source === 'api-only') {
-    return '⚠ API Only';
+  if (source === 'local-metadata') {
+    return '⚠ Local Metadata';
   }
   return '⚠ Unverified';
 }
@@ -122,17 +128,15 @@ function buildDisplayText(
   to: string,
   chainId: number,
   warnings: string[],
-  nestedCalls: ValidateBankrbotTxResult['nestedCalls'] = []
+  validation: ValidateBankrbotTxResult
 ): string {
-  const lines: string[] = [];
+  const lines: string[] = [`${badge} Transaction`, ''];
 
-  // Header
-  if (verified) {
-    lines.push(`${badge} Transaction`);
-  } else {
-    lines.push(`${badge} Transaction`);
+  // Tiered status (decoded / attested / verdict + per-contract summary)
+  if (validation.signing) {
+    lines.push(...renderStatusLines(validation.signing, validation.contracts ?? []));
+    lines.push('');
   }
-  lines.push('');
 
   // Intent
   lines.push(intent);
@@ -147,15 +151,10 @@ function buildDisplayText(
     lines.push(`Value: ${ethValue}`);
   }
 
-  // Nested calls
-  if (nestedCalls.length > 0) {
+  // Decoded call tree
+  if (validation.callTree) {
     lines.push('');
-    lines.push('Nested calls:');
-    nestedCalls.forEach((call, index) => {
-      const fn = call.functionName || call.selector;
-      const status = call.success ? '' : ' [UNKNOWN/FAILED]';
-      lines.push(`${index + 1}. ${fn} on ${call.target}: ${call.intent}${status}`);
-    });
+    lines.push(renderCallTree(validation.callTree, validation.contracts ?? []));
   }
 
   // Warnings
@@ -196,7 +195,7 @@ export async function getClearSignPrompt(input: ClearSignInput): Promise<ClearSi
     parsed.to,
     parsed.chainId,
     validation.warnings,
-    validation.nestedCalls
+    validation
   );
 
   // Build result
@@ -213,6 +212,9 @@ export async function getClearSignPrompt(input: ClearSignInput): Promise<ClearSi
       intent: call.intent,
       success: call.success
     })),
+    nestedIntents: validation.nestedIntents,
+    signing: validation.signing,
+    contracts: validation.contracts,
     fullyDecoded: validation.fullyDecoded,
     requiresHumanReview: validation.requiresHumanReview,
     safeToAutonomouslySign: validation.safeToAutonomouslySign,

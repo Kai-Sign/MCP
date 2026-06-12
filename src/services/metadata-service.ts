@@ -1,23 +1,41 @@
 /**
  * Metadata Service
- * Fetches ERC-7730 metadata from KaiSign API with caching
+ * Loads ERC-7730 metadata from local JSON files with caching.
  */
 
 import {
-  KAISIGN_API,
+  KAISIGN_METADATA_DIR,
   RPC_URLS,
   EIP1967_IMPL_SLOT,
   SAFE_MASTER_COPY_SLOT
 } from '../config/constants.js';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { cacheManager } from './cache-manager.js';
-import { onChainVerifier, VerificationResult } from './onchain-verifier.js';
+import { VerificationResult } from './onchain-verifier.js';
+import { id as keccakId } from 'ethers';
+
+const FETCH_TIMEOUT_MS = Number(process.env.KAISIGN_MCP_FETCH_TIMEOUT_MS || 15000);
+
+async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface ContractMetadata {
   $schema?: string;
   context?: {
     contract?: {
       abi?: ABIEntry[];
-      deployments?: Record<string, string>;
+      address?: string;
+      chainId?: number;
+      deployments?: Record<string, string | string[] | number>;
       name?: string;
       symbol?: string;
       decimals?: number;
@@ -39,7 +57,7 @@ export interface ContractMetadata {
 }
 
 export interface RecursiveRule {
-  type: 'calldata' | 'calls' | 'commands' | string;
+  type: 'calldata' | 'calls' | 'parallelCalls' | 'commands' | string;
   calldataPath?: string;
   targetPath?: string;
   valuePath?: string;
@@ -55,6 +73,7 @@ export interface ABIEntry {
   name?: string;
   inputs?: ABIInput[];
   selector?: string;
+  stateMutability?: string;
 }
 
 export interface ABIInput {
@@ -111,11 +130,199 @@ export interface TokenMetadata {
   address: string;
 }
 
-export class MetadataService {
-  private apiBase: string;
+type LocalMetadataEntry = {
+  path: string;
+  metadata: ContractMetadata;
+  chainId?: number;
+};
 
-  constructor(config?: { apiBase?: string }) {
-    this.apiBase = config?.apiBase ?? KAISIGN_API;
+class LocalMetadataIndex {
+  readonly byAddress = new Map<string, LocalMetadataEntry[]>();
+  readonly allEntries: LocalMetadataEntry[] = [];
+
+  constructor(readonly rootDirs: string[]) {}
+
+  get(address: string) {
+    const entries = this.byAddress.get(address.toLowerCase()) ?? [];
+    return {
+      find: (chainId: number, selector?: string) => findBestLocalMetadata(entries, chainId, selector)
+    };
+  }
+
+  hasAddress(address: string, chainId: number): boolean {
+    const entries = this.byAddress.get(address.toLowerCase()) ?? [];
+    return entries.some(entry => entry.chainId === undefined || entry.chainId === chainId);
+  }
+
+  findByUniqueSelector(chainId: number, selector?: string): ContractMetadata | null {
+    if (!selector) return null;
+    const candidates = this.allEntries
+      .filter(entry => entry.chainId === undefined || entry.chainId === chainId)
+      .filter(entry => metadataHasSelector(entry.metadata, selector));
+
+    const uniqueByFile = new Map<string, LocalMetadataEntry>();
+    for (const candidate of candidates) uniqueByFile.set(candidate.path, candidate);
+    if (uniqueByFile.size !== 1) return null;
+    return cloneMetadata([...uniqueByFile.values()][0].metadata);
+  }
+}
+
+function repoRootFromModule(): string {
+  // src/services/*.ts and dist/services/*.js both resolve two levels up to repo root.
+  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+}
+
+function buildMetadataDirs(configDir?: string): string[] {
+  const repoRoot = repoRootFromModule();
+  const explicitDir = configDir ?? KAISIGN_METADATA_DIR;
+  if (explicitDir) {
+    const resolved = resolve(explicitDir);
+    return existsSync(resolved) && statSync(resolved).isDirectory() ? [resolved] : [];
+  }
+
+  const candidates = [
+    resolve(repoRoot, 'metadata'),
+    resolve(process.cwd(), 'metadata'),
+    resolve(repoRoot, '..', 'kaisign-backend', 'backend', 'metadata'),
+    resolve(process.cwd(), '..', 'kaisign-backend', 'backend', 'metadata'),
+    resolve(process.cwd(), 'backend', 'metadata')
+  ];
+
+  const firstExisting = candidates.map(path => resolve(path)).find(path => existsSync(path) && statSync(path).isDirectory());
+  return firstExisting ? [firstExisting] : [];
+}
+
+function buildLocalMetadataIndex(rootDirs: string[]): LocalMetadataIndex {
+  const index = new LocalMetadataIndex(rootDirs);
+  const skipped: string[] = [];
+  for (const rootDir of rootDirs) {
+    for (const file of walkJsonFiles(rootDir)) {
+      try {
+        const metadata = JSON.parse(readFileSync(file, 'utf8')) as ContractMetadata;
+        index.allEntries.push({ path: file, metadata });
+        for (const binding of extractAddressBindings(metadata)) {
+          const entry: LocalMetadataEntry = { path: file, metadata, chainId: binding.chainId };
+          const current = index.byAddress.get(binding.address) ?? [];
+          current.push(entry);
+          index.byAddress.set(binding.address, current);
+        }
+      } catch {
+        skipped.push(file);
+      }
+    }
+  }
+  if (skipped.length > 0) {
+    console.warn(`[MetadataService] Skipped ${skipped.length} unparseable JSON file(s) while indexing metadata, e.g.: ${skipped.slice(0, 3).join(', ')}`);
+  }
+  return index;
+}
+
+function walkJsonFiles(rootDir: string): string[] {
+  const out: string[] = [];
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    for (const name of readdirSync(dir)) {
+      const path = resolve(dir, name);
+      const stat = statSync(path);
+      if (stat.isDirectory()) stack.push(path);
+      else if (name.endsWith('.json')) out.push(path);
+    }
+  }
+  return out;
+}
+
+function normalizeAddress(value: unknown): string | null {
+  return typeof value === 'string' && /^0x[a-fA-F0-9]{40}$/.test(value)
+    ? value.toLowerCase()
+    : null;
+}
+
+function maybeChainId(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value)) return value;
+  if (typeof value === 'string' && /^\\d+$/.test(value)) return Number(value);
+  return undefined;
+}
+
+function extractAddressBindings(metadata: ContractMetadata): Array<{ address: string; chainId?: number }> {
+  const contract = metadata.context?.contract;
+  if (!contract) return [];
+
+  const bindings: Array<{ address: string; chainId?: number }> = [];
+  const direct = normalizeAddress(contract.address);
+  if (direct) bindings.push({ address: direct, chainId: maybeChainId(contract.chainId) });
+
+  const deployments = contract.deployments ?? {};
+  for (const [key, rawValue] of Object.entries(deployments)) {
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+    for (const value of values) {
+      if (value && typeof value === 'object') {
+        const deployment = value as { address?: unknown; chainId?: unknown };
+        const address = normalizeAddress(deployment.address) ?? normalizeAddress(key);
+        if (!address) continue;
+        bindings.push({ address, chainId: maybeChainId(deployment.chainId) ?? maybeChainId(key) });
+        continue;
+      }
+
+      const address = normalizeAddress(value) ?? normalizeAddress(key);
+      if (!address) continue;
+      const chainId = normalizeAddress(key) ? maybeChainId(value) : maybeChainId(key);
+      bindings.push({ address, chainId });
+    }
+  }
+
+  const seen = new Set<string>();
+  return bindings.filter(binding => {
+    const key = `${binding.chainId ?? '*'}:${binding.address}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function abiInputSignature(input: ABIInput): string {
+  if (!input.type.startsWith('tuple')) return input.type;
+  const suffix = input.type.slice('tuple'.length);
+  const inner = (input.components ?? []).map(abiInputSignature).join(',');
+  return `(${inner})${suffix}`;
+}
+
+function abiEntrySelector(entry: ABIEntry): string | null {
+  if (entry.selector) return entry.selector.toLowerCase();
+  if (entry.type !== 'function' || !entry.name) return null;
+  const types = (entry.inputs ?? []).map(abiInputSignature).join(',');
+  return keccakId(`${entry.name}(${types})`).slice(0, 10).toLowerCase();
+}
+
+function metadataHasSelector(metadata: ContractMetadata, selector?: string): boolean {
+  if (!selector) return true;
+  const normalized = selector.toLowerCase();
+  const abi = metadata.context?.contract?.abi;
+  const abiHasSelector = Array.isArray(abi) && abi.some(entry => abiEntrySelector(entry) === normalized);
+  const displayHasSelector = Boolean(metadata.display?.formats?.[normalized]);
+  return abiHasSelector || displayHasSelector;
+}
+
+function cloneMetadata(metadata: ContractMetadata): ContractMetadata {
+  return JSON.parse(JSON.stringify(metadata)) as ContractMetadata;
+}
+
+function findBestLocalMetadata(entries: LocalMetadataEntry[], chainId: number, selector?: string): ContractMetadata | null {
+  const candidates = entries
+    .filter(entry => entry.chainId === undefined || entry.chainId === chainId)
+    .filter(entry => metadataHasSelector(entry.metadata, selector));
+
+  const exactChain = candidates.find(entry => entry.chainId === chainId);
+  const fallback = exactChain ?? candidates[0];
+  return fallback ? cloneMetadata(fallback.metadata) : null;
+}
+
+export class MetadataService {
+  private metadataDirs: string[];
+  private localIndex?: LocalMetadataIndex;
+
+  constructor(config?: { metadataDir?: string }) {
+    this.metadataDirs = buildMetadataDirs(config?.metadataDir);
   }
 
   /**
@@ -124,7 +331,7 @@ export class MetadataService {
   private async ethCall(to: string, data: string, chainId: number): Promise<string> {
     const rpcUrls = RPC_URLS[chainId] ?? RPC_URLS[1];
 
-    const response = await fetch(rpcUrls[0], {
+    const response = await fetchWithTimeout(rpcUrls[0], {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -145,7 +352,7 @@ export class MetadataService {
   private async ethGetStorageAt(address: string, slot: string, chainId: number): Promise<string> {
     const rpcUrls = RPC_URLS[chainId] ?? RPC_URLS[1];
 
-    const response = await fetch(rpcUrls[0], {
+    const response = await fetchWithTimeout(rpcUrls[0], {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -206,22 +413,21 @@ export class MetadataService {
     return null;
   }
 
+  private getLocalIndex(): LocalMetadataIndex {
+    if (!this.localIndex) this.localIndex = buildLocalMetadataIndex(this.metadataDirs);
+    return this.localIndex;
+  }
+
+  hasLocalContractMetadata(address: string, chainId: number): boolean {
+    return this.getLocalIndex().hasAddress(address.toLowerCase(), chainId);
+  }
+
   /**
-   * Fetch metadata from API
+   * Fetch metadata from local backend/metadata JSON files only.
    */
-  private async fetchMetadataFromAPI(address: string, chainId: number, selector?: string): Promise<ContractMetadata | null> {
-    const params = new URLSearchParams({ chain_id: String(chainId) });
-    if (selector) params.set('selector', selector.toLowerCase());
-    const url = `${this.apiBase}/api/py/contract/${address.toLowerCase()}?${params.toString()}`;
-
-    const response = await fetch(url);
-    const data = await response.json() as { success: boolean; metadata?: ContractMetadata; error?: string };
-
-    if (!data.success || !data.metadata) {
-      return null;
-    }
-
-    return data.metadata;
+  private fetchMetadataFromLocal(address: string, chainId: number, selector?: string): ContractMetadata | null {
+    const index = this.getLocalIndex();
+    return index.get(address.toLowerCase())?.find(chainId, selector) ?? index.findByUniqueSelector(chainId, selector);
   }
 
   /**
@@ -235,14 +441,15 @@ export class MetadataService {
     const normalizedAddress = address.toLowerCase();
 
     // Check cache
-    const cached = cacheManager.getMetadata<ContractMetadata>(normalizedAddress, chainId);
-    if (cached) {
+    const cached = cacheManager.getMetadata<ContractMetadata>(normalizedAddress, chainId, selector)
+      ?? cacheManager.getMetadata<ContractMetadata>(normalizedAddress, chainId);
+    if (cached && metadataHasSelector(cached, selector)) {
       return cached;
     }
 
     try {
-      // Try direct lookup first
-      let metadata = await this.fetchMetadataFromAPI(normalizedAddress, chainId, selector);
+      // Try direct local metadata lookup first.
+      let metadata = this.fetchMetadataFromLocal(normalizedAddress, chainId, selector);
 
       // If no metadata, try proxy detection
       if (!metadata) {
@@ -250,7 +457,7 @@ export class MetadataService {
         if (selector) {
           const facetAddress = await this.getDiamondFacetAddress(normalizedAddress, selector, chainId);
           if (facetAddress && facetAddress !== normalizedAddress) {
-            metadata = await this.fetchMetadataFromAPI(facetAddress, chainId, selector);
+            metadata = this.fetchMetadataFromLocal(facetAddress, chainId, selector);
           }
         }
 
@@ -258,7 +465,7 @@ export class MetadataService {
         if (!metadata) {
           const implAddress = await this.getImplementationAddress(normalizedAddress, chainId);
           if (implAddress && implAddress !== normalizedAddress) {
-            metadata = await this.fetchMetadataFromAPI(implAddress, chainId, selector);
+            metadata = this.fetchMetadataFromLocal(implAddress, chainId, selector);
           }
         }
       }
@@ -267,22 +474,17 @@ export class MetadataService {
         return null;
       }
 
-      // Run on-chain verification
-      try {
-        const verification = await onChainVerifier.verifyMetadata(normalizedAddress, chainId);
-        metadata._verification = verification;
-      } catch (e) {
-        metadata._verification = {
-          verified: false,
-          source: 'error',
-          details: (e as Error).message,
-          hash: null,
-          onChainHash: null
-        };
-      }
+      metadata._verification = {
+        verified: false,
+        source: 'local-metadata',
+        details: `loaded from local metadata directory: ${this.getLocalIndex().rootDirs.join(', ')}`,
+        hash: null,
+        onChainHash: null
+      };
 
       // Cache result
-      cacheManager.setMetadata(normalizedAddress, chainId, metadata);
+      cacheManager.setMetadata(normalizedAddress, chainId, metadata, selector);
+      if (selector) cacheManager.setMetadata(normalizedAddress, chainId, metadata);
 
       return metadata;
     } catch (e) {

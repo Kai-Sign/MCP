@@ -3,7 +3,6 @@ import { Interface } from 'ethers';
 import { cacheManager } from '../../src/services/cache-manager.js';
 import { RecursiveCalldataDecoder } from '../../src/services/recursive-decoder.js';
 import { decodeTransaction } from '../../src/tools/decode-transaction.js';
-import { validateBankrbotTransaction } from '../../src/tools/validate-bankrbot-tx.js';
 import { getClearSignPrompt } from '../../src/tools/get-clear-sign-prompt.js';
 import { onChainVerifier } from '../../src/services/onchain-verifier.js';
 import type { ContractMetadata } from '../../src/services/metadata-service.js';
@@ -32,6 +31,7 @@ const wrapperIface = new Interface([
   'function relay(address recipient,bytes payload)'
 ]);
 const batchIface = new Interface(['function batch(tuple(address target,bytes callData,uint256 value)[] calls)']);
+const parallelBatchIface = new Interface(['function executeBatch(address[] dest,uint256[] value,bytes[] func)']);
 const routerIface = new Interface(['function execute(bytes commands,bytes[] inputs)']);
 
 function sig(fragment: string): string {
@@ -139,6 +139,41 @@ describe('RecursiveCalldataDecoder', () => {
     ]);
   });
 
+  it('decodes metadata-defined parallel AA executeBatch arrays into actual inner intents', async () => {
+    seed(erc20, erc20Metadata());
+    seed(batcher, metadata('LightAccountLike', [
+      { type: 'function', name: 'executeBatch', inputs: [
+        { name: 'dest', type: 'address[]' },
+        { name: 'value', type: 'uint256[]' },
+        { name: 'func', type: 'bytes[]' }
+      ] }
+    ], {
+      'executeBatch(address[],uint256[],bytes[])': {
+        intent: 'Execute batch transactions via LightAccountLike',
+        recursive: [{ type: 'parallelCalls', targetPath: 'dest', valuePath: 'value', calldataPath: 'func' }]
+      }
+    }));
+    const approveIface = new Interface(['function approve(address spender,uint256 amount)']);
+    seed(unknown, metadata('ApprovalToken', [
+      { type: 'function', name: 'approve', inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }] }
+    ], {
+      'approve(address,uint256)': { intent: 'Approve {amount} tokens to {spender}', fields: [{ path: 'spender', label: 'Spender' }, { path: 'amount', label: 'Amount' }] }
+    }));
+    const inner1 = approveIface.encodeFunctionData('approve', [recipient, 1000n]);
+    const inner2 = erc20Iface.encodeFunctionData('transfer', [recipient, 10n]);
+    const outer = parallelBatchIface.encodeFunctionData('executeBatch', [[unknown, erc20], [0n, 0n], [inner1, inner2]]);
+
+    const decoded = await new RecursiveCalldataDecoder().decode(outer, batcher, chainId);
+
+    expect(decoded.callTree.children.map(c => c.functionName)).toEqual(['approve', 'transfer']);
+    expect(decoded.nestedIntents).toEqual([
+      'Approve 1000 tokens to 0x6000000000000000000000000000000000000006',
+      'Transfer 10 tokens to 0x6000000000000000000000000000000000000006'
+    ]);
+    expect(decoded.aggregatedIntent).toContain('Approve 1000 tokens');
+    expect(decoded.aggregatedIntent).toContain('Transfer 10 tokens');
+  });
+
   it('decodes command registry commands only from metadata.commandRegistries and recursive command rules', async () => {
     seed(erc20, erc20Metadata());
     seed(router, metadata('RouterLike', [
@@ -174,7 +209,7 @@ describe('RecursiveCalldataDecoder', () => {
     expect(decoded.aggregatedIntent).toContain('Transfer 5 tokens');
   });
 
-  it('surfaces unknown inner selector and validate_bankrbot safeToAutonomouslySign=false', async () => {
+  it('surfaces unknown inner selector and rejects autonomous signing', async () => {
     seed(wrapper, metadata('Wrapper', [
       { type: 'function', name: 'execute', inputs: [
         { name: 'target', type: 'address' },
@@ -190,15 +225,16 @@ describe('RecursiveCalldataDecoder', () => {
     const outer = wrapperIface.encodeFunctionData('execute', [unknown, '0x12345678', 0n]);
 
     const decoded = await new RecursiveCalldataDecoder().decode(outer, wrapper, chainId);
-    const validation = await validateBankrbotTransaction({ to: wrapper, data: outer, chainId, value: '0' });
+    const validation = await decodeTransaction({ to: wrapper, data: outer, chainId, value: '0' });
 
     expect(decoded.hasUnknownInnerCalls).toBe(true);
     expect(decoded.warnings.some(w => w.includes('unknown inner call') || w.includes('No metadata'))).toBe(true);
     expect(validation.hasUnknownInnerCalls).toBe(true);
-    expect(validation.safeToAutonomouslySign).toBe(false);
+    expect(validation.signing.verdict).toBe('reject');
   });
 
-  it('stops recursive cycles using target plus selector stack keys', async () => {
+  it('does not treat same target and selector with different calldata as a cycle', async () => {
+    seed(erc20, erc20Metadata());
     seed(wrapper, metadata('Wrapper', [
       { type: 'function', name: 'execute', inputs: [
         { name: 'target', type: 'address' },
@@ -207,17 +243,60 @@ describe('RecursiveCalldataDecoder', () => {
       ] }
     ], {
       'execute(address,bytes,uint256)': {
-        intent: 'Execute loop',
-        recursive: [{ type: 'calldata', calldataPath: 'callData', targetPath: 'target' }]
+        intent: 'Execute nested call',
+        recursive: [{ type: 'calldata', calldataPath: 'callData', targetPath: 'target', valuePath: 'value' }]
       }
     }));
-    const nested = wrapperIface.encodeFunctionData('execute', [wrapper, '0x12345678', 0n]);
-    const cyclic = wrapperIface.encodeFunctionData('execute', [wrapper, nested, 0n]);
+    const transfer = erc20Iface.encodeFunctionData('transfer', [recipient, 42n]);
+    const nested = wrapperIface.encodeFunctionData('execute', [erc20, transfer, 0n]);
+    const outer = wrapperIface.encodeFunctionData('execute', [wrapper, nested, 0n]);
 
-    const decoded = await new RecursiveCalldataDecoder().decode(cyclic, wrapper, chainId);
+    const decoded = await new RecursiveCalldataDecoder().decode(outer, wrapper, chainId);
 
-    expect(decoded.cycleDetected).toBe(true);
-    expect(decoded.warnings.some(w => w.toLowerCase().includes('cycle'))).toBe(true);
+    expect(decoded.cycleDetected).toBe(false);
+    expect(decoded.callTree.children[0].functionName).toBe('execute');
+    expect(decoded.callTree.children[0].children[0].functionName).toBe('transfer');
+    expect(decoded.nestedIntents).toContain('Transfer 42 tokens to 0x6000000000000000000000000000000000000006');
+  });
+
+  it('decodes very deep real wrapper nesting before terminal batch calls', async () => {
+    seed(erc20, erc20Metadata());
+    seed(wrapper, metadata('LightAccountLike', [
+      { type: 'function', name: 'execute', inputs: [
+        { name: 'dest', type: 'address' },
+        { name: 'value', type: 'uint256' },
+        { name: 'func', type: 'bytes' }
+      ] },
+      { type: 'function', name: 'executeBatch', inputs: [
+        { name: 'dest', type: 'address[]' },
+        { name: 'value', type: 'uint256[]' },
+        { name: 'func', type: 'bytes[]' }
+      ] }
+    ], {
+      'execute(address,uint256,bytes)': {
+        intent: 'Execute nested LightAccount call',
+        recursive: [{ type: 'calldata', calldataPath: 'func', targetPath: 'dest', valuePath: 'value' }]
+      },
+      'executeBatch(address[],uint256[],bytes[])': {
+        intent: 'Execute LightAccount batch',
+        recursive: [{ type: 'parallelCalls', targetPath: 'dest', valuePath: 'value', calldataPath: 'func' }]
+      }
+    }));
+
+    const transfer1 = erc20Iface.encodeFunctionData('transfer', [recipient, 1n]);
+    const transfer2 = erc20Iface.encodeFunctionData('transfer', [recipient, 2n]);
+    let nested = parallelBatchIface.encodeFunctionData('executeBatch', [[erc20, erc20], [0n, 0n], [transfer1, transfer2]]);
+    for (let i = 0; i < 25; i++) {
+      nested = new Interface(['function execute(address dest,uint256 value,bytes func)']).encodeFunctionData('execute', [wrapper, 0n, nested]);
+    }
+
+    const decoded = await new RecursiveCalldataDecoder().decode(nested, wrapper, chainId);
+
+    expect(decoded.truncated).toBe(false);
+    expect(decoded.cycleDetected).toBe(false);
+    expect(decoded.hasUnknownInnerCalls).toBe(false);
+    expect(decoded.nestedIntents).toContain('Transfer 1 tokens to 0x6000000000000000000000000000000000000006');
+    expect(decoded.nestedIntents).toContain('Transfer 2 tokens to 0x6000000000000000000000000000000000000006');
   });
 
   it('stops at maxDepth with truncated=true and warning', async () => {
@@ -378,7 +457,7 @@ describe('decode_transaction recursive output', () => {
     expect(decoded.aggregatedIntent).toContain('Swap 100');
     expect(decoded.aggregatedIntent).toContain('Transfer 42 tokens');
     expect(prompt.displayText).toContain('Swap 100');
-    expect(prompt.displayText).toContain('Nested calls:');
+    expect(prompt.displayText).toContain('└─ transfer');
     expect(prompt.displayText).toContain('Transfer 42 tokens');
   });
 });

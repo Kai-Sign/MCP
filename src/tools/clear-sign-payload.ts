@@ -6,8 +6,12 @@
  * the exact original transaction the user/agent must sign.
  */
 
-import { Transaction } from 'ethers';
+import { Transaction, keccak256 } from 'ethers';
+import { gunzipSync } from 'node:zlib';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { z } from 'zod';
+import { getPayloadFromStore, getPayloadTextFromStore } from '../services/payload-store.js';
 import { getClearSignPrompt, type ClearSignInput, type ClearSignResult } from './get-clear-sign-prompt.js';
 
 export const clearSignPayloadSchema = z.object({}).passthrough();
@@ -26,6 +30,8 @@ export interface ClearSignPayloadDeps {
 export interface ClearSignPayloadResult {
   transaction: NormalizedTransactionPayload;
   clearSign: ClearSignResult;
+  /** Unified signing verdict shared by all KaiSign tools */
+  signing?: ClearSignResult['signing'];
   signingPolicy: {
     signOriginalTransactionOnly: true;
     canAutonomouslySign: boolean;
@@ -76,6 +82,61 @@ function hasTransactionFields(input: Record<string, unknown>): boolean {
   const hasData = input.data !== undefined || input.calldata !== undefined || input.input !== undefined;
   const hasRaw = rawTxFrom(input) !== undefined;
   return hasRaw || (hasTo && hasData);
+}
+
+function readTextFile(path: string): string {
+  return readFileSync(resolve(path), 'utf8').trim();
+}
+
+function decodeGzipBase64(value: unknown): string | undefined {
+  const encoded = asString(value);
+  if (!encoded) return undefined;
+  return gunzipSync(Buffer.from(encoded, 'base64')).toString('utf8').trim();
+}
+
+function parsePayloadText(text: string): unknown {
+  if (/^0x[0-9a-fA-F]+$/.test(text)) return text;
+  return JSON.parse(text);
+}
+
+function fileBackedPayload(input: Record<string, unknown>): unknown {
+  const payloadGzip = decodeGzipBase64(input.payloadGzipBase64 ?? input.transactionGzipBase64 ?? input.txGzipBase64);
+  if (payloadGzip) return parsePayloadText(payloadGzip);
+
+  const payloadRef = asString(input.payloadRef ?? input.transactionRef ?? input.txRef);
+  if (payloadRef) return getPayloadFromStore(payloadRef);
+
+  const payloadFile = asString(input.payloadFile ?? input.transactionFile ?? input.txFile ?? input.inputFile);
+  if (payloadFile) return parsePayloadText(readTextFile(payloadFile));
+
+  const rawTxFile = asString(input.rawTxFile ?? input.rawTransactionFile ?? input.serializedTransactionFile);
+  if (rawTxFile) return readTextFile(rawTxFile);
+
+  const dataGzip = decodeGzipBase64(input.dataGzipBase64 ?? input.calldataGzipBase64);
+  if (dataGzip) {
+    return {
+      ...input,
+      data: dataGzip
+    };
+  }
+
+  const dataRef = asString(input.dataRef ?? input.calldataRef);
+  if (dataRef) {
+    return {
+      ...input,
+      data: getPayloadTextFromStore(dataRef).trim()
+    };
+  }
+
+  const dataFile = asString(input.dataFile ?? input.calldataFile);
+  if (dataFile) {
+    return {
+      ...input,
+      data: readTextFile(dataFile)
+    };
+  }
+
+  return input;
 }
 
 function nestedPayload(input: unknown): Record<string, unknown> {
@@ -147,6 +208,8 @@ function normalizeRawTransaction(rawTx: string): NormalizedTransactionPayload {
 }
 
 export function normalizeTransactionPayload(input: unknown): NormalizedTransactionPayload {
+  if (isRecord(input)) input = fileBackedPayload(input);
+
   if (typeof input === 'string') {
     if (/^0x[0-9a-fA-F]+$/.test(input.trim())) return normalizeRawTransaction(input);
     throw new Error('string payload must be a serialized raw transaction hex string');
@@ -185,24 +248,96 @@ function getClearSignPromptSchemaCompatibleParse(input: NormalizedTransactionPay
   return input;
 }
 
+function compactHex(hex: string) {
+  return {
+    omitted: true,
+    bytes: (hex.length - 2) / 2,
+    keccak256: keccak256(hex),
+    prefix: hex.slice(0, 18),
+    suffix: hex.slice(-16)
+  };
+}
+
+function isLongHex(value: unknown): value is string {
+  return typeof value === 'string' && /^0x[0-9a-fA-F]+$/.test(value) && value.length > 98;
+}
+
+function compactHexString(hex: string): string {
+  const summary = compactHex(hex);
+  return `[omitted ${summary.bytes} bytes ${summary.keccak256}]`;
+}
+
+function compactLargeHexValues<T>(value: T, seen = new WeakSet<object>()): T {
+  if (isLongHex(value)) return compactHexString(value) as T;
+
+  if (Array.isArray(value)) {
+    return value.map(item => compactLargeHexValues(item, seen)) as T;
+  }
+
+  if (value && typeof value === 'object') {
+    if (seen.has(value as object)) return value;
+    seen.add(value as object);
+
+    const output: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      output[key] = compactLargeHexValues(entry, seen);
+    }
+    return output as T;
+  }
+
+  return value;
+}
+
+function wantsCompact(input: unknown): boolean {
+  return isRecord(input) && (input.compact === true || input.responseMode === 'compact' || input.omitTransactionData === true);
+}
+
 export async function clearSignPayload(
   input: unknown,
   deps: ClearSignPayloadDeps = { getClearSignPrompt }
 ): Promise<ClearSignPayloadResult> {
+  const compact = wantsCompact(input);
   const transaction = normalizeTransactionPayload(input);
   const clearSign = await deps.getClearSignPrompt(transaction);
   const warnings = Array.isArray(clearSign.warnings) ? clearSign.warnings : [];
-  const canAutonomouslySign = Boolean(clearSign.safeToAutonomouslySign && clearSign.verified && warnings.length === 0);
+  const canAutonomouslySign = clearSign.signing
+    ? clearSign.signing.verdict === 'safe' && warnings.length === 0
+    : Boolean(clearSign.safeToAutonomouslySign && clearSign.verified && warnings.length === 0);
   const mustShowToUser = Boolean(clearSign.requiresHumanReview || !canAutonomouslySign);
 
-  return {
+  const result: ClearSignPayloadResult = {
     transaction,
     clearSign,
+    signing: clearSign.signing,
     signingPolicy: {
       signOriginalTransactionOnly: true,
       canAutonomouslySign,
       mustShowToUser,
-      blockReason: canAutonomouslySign ? undefined : 'requires user or agent policy approval before signing/broadcasting'
+      blockReason: canAutonomouslySign ? undefined : (clearSign.signing?.reason ?? 'requires user or agent policy approval before signing/broadcasting')
     }
   };
+
+  if (compact) {
+    const dataSummary = compactHex(transaction.data);
+    const compactData = `[omitted ${dataSummary.bytes} bytes ${dataSummary.keccak256}]`;
+    const compactClearSign = compactLargeHexValues(clearSign);
+
+    return {
+      ...result,
+      transaction: {
+        ...transaction,
+        data: compactData
+      },
+      clearSign: {
+        ...compactClearSign,
+        transaction: {
+          ...compactClearSign.transaction,
+          data: compactData
+        },
+        dataSummary
+      } as ClearSignResult & { dataSummary: ReturnType<typeof compactHex> }
+    };
+  }
+
+  return result;
 }

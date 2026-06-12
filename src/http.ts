@@ -15,7 +15,7 @@ import { handleMcpToolCall, mcpTools, server } from './index.js';
 
 const DEFAULT_PORT = 3333;
 const DEFAULT_HOST = '0.0.0.0';
-const MAX_BODY_BYTES = 4 * 1024 * 1024;
+const MAX_BODY_BYTES = Number(process.env.KAISIGN_MCP_MAX_BODY_BYTES || 32 * 1024 * 1024);
 
 const transports = new Map<string, SSEServerTransport>();
 const streamableSessions = new Set<string>();
@@ -257,6 +257,17 @@ async function main(): Promise<void> {
         res.end();
       }
     });
+  });
+
+  httpServer.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`KaiSign MCP HTTP Server failed: ${host}:${port} is already in use.`);
+      console.error(`Use the existing server at http://127.0.0.1:${port}/mcp, stop the old process, or start this one with PORT=${port + 1}.`);
+      process.exit(1);
+    }
+
+    console.error('KaiSign MCP HTTP Server failed:', error);
+    process.exit(1);
   });
 
   httpServer.listen(port, host, () => {

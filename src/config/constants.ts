@@ -45,8 +45,8 @@ export const RPC_URLS: Record<number, string[]> = {
   ]
 };
 
-// KaiSign API
-export const KAISIGN_API = process.env.KAISIGN_API_URL || 'https://kai-sign-production.up.railway.app';
+// Local ERC-7730 metadata directory. MCP is local-first; do not depend on the hosted API.
+export const KAISIGN_METADATA_DIR = process.env.KAISIGN_METADATA_DIR;
 
 // Bankrbot API
 export const BANKR_API_URL = process.env.BANKR_API_URL || 'https://api.bankr.bot';

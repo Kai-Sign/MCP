@@ -6,6 +6,8 @@
 import { z } from 'zod';
 import { recursiveCalldataDecoder, type RecursiveCallNode } from '../services/recursive-decoder.js';
 import { onChainVerifier } from '../services/onchain-verifier.js';
+import { attestContracts } from './decode-transaction.js';
+import { computeSigningStatus, type ContractSummary, type SigningStatus } from './signing-policy.js';
 
 export const validateBankrbotTxSchema = z.object({
   to: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
@@ -20,8 +22,8 @@ export interface ValidateBankrbotTxResult {
   /** Whether the outer contract has leaf-verified KaiSign metadata */
   verified: boolean;
 
-  /** Verification source: 'leaf-verified' (trustless), 'api-only', 'unverified', or 'error' */
-  source: 'leaf-verified' | 'api-only' | 'unverified' | 'mismatch' | 'error';
+  /** Verification source: 'leaf-verified' (trustless), 'local-metadata', 'unverified', or 'error' */
+  source: 'leaf-verified' | 'local-metadata' | 'unverified' | 'mismatch' | 'error';
 
   /** Human-readable description of transaction intent */
   intent: string;
@@ -37,6 +39,10 @@ export interface ValidateBankrbotTxResult {
   nestedCalls: RecursiveCallNode[];
   callTree?: RecursiveCallNode;
   nestedIntents: string[];
+
+  /** Unified signing verdict shared by all KaiSign tools */
+  signing?: SigningStatus;
+  contracts?: ContractSummary[];
 
   /** Agent-safe decision fields */
   fullyDecoded: boolean;
@@ -160,11 +166,9 @@ export async function validateBankrbotTransaction(
       warnings.push(`Decoding failed: ${decoded.root.error || 'Unknown error'}`);
     }
 
-    if (result.source === 'api-only') {
-      warnings.push('Metadata verified via API only, not on-chain. Consider waiting for on-chain attestation.');
-    } else if (result.source === 'unverified') {
-      warnings.push('Contract has no verified metadata. Transaction intent cannot be independently verified.');
-    } else if (result.source === 'mismatch') {
+    // Registry attestation pending is status (carried by signing.reason / contracts
+    // summary), not a warning. Only real integrity problems warn.
+    if (result.source === 'mismatch') {
       warnings.push('CRITICAL: Metadata hash mismatch. Do not sign autonomously.');
     }
 
@@ -175,11 +179,24 @@ export async function validateBankrbotTransaction(
       }
     }
 
+    // Unified per-contract attestation + verdict.
+    result.contracts = await attestContracts(decoded.contracts, false);
+    result.signing = computeSigningStatus({
+      decodedCalls: decoded.decodedCalls,
+      totalCalls: decoded.totalCalls,
+      contracts: result.contracts,
+      truncated: decoded.truncated,
+      cycleDetected: decoded.cycleDetected,
+      hasUnknownInnerCalls: decoded.hasUnknownInnerCalls,
+      metadataHashMismatch: result.source === 'mismatch',
+      error: decoded.root.error
+    });
+
     const hasCritical = hasCriticalWarning(warnings);
     result.fullyDecoded = Boolean(decoded.root.success && !decoded.hasUnknownInnerCalls && !decoded.truncated && !decoded.cycleDetected && decoded.errors.length === 0);
     result.hasUnverifiedMetadata = result.hasUnverifiedMetadata || !result.verified;
-    result.requiresHumanReview = Boolean(!result.fullyDecoded || !result.verified || result.hasUnknownInnerCalls || result.hasUnverifiedMetadata || hasCritical);
-    result.safeToAutonomouslySign = Boolean(
+    result.requiresHumanReview = result.signing.verdict !== 'safe';
+    result.safeToAutonomouslySign = result.signing.verdict === 'safe' && Boolean(
       result.verified &&
       result.source === 'leaf-verified' &&
       result.fullyDecoded &&

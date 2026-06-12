@@ -49,15 +49,16 @@ export class CacheManager {
   /**
    * Generate cache key for metadata
    */
-  private getMetadataKey(contractAddress: string, chainId: number): string {
-    return `${contractAddress.toLowerCase()}-${chainId}`;
+  private getMetadataKey(contractAddress: string, chainId: number, selector?: string): string {
+    const suffix = selector ? `-${selector.toLowerCase()}` : '';
+    return `${contractAddress.toLowerCase()}-${chainId}${suffix}`;
   }
 
   /**
    * Get cached metadata
    */
-  getMetadata<T>(contractAddress: string, chainId: number): T | null {
-    const key = this.getMetadataKey(contractAddress, chainId);
+  getMetadata<T>(contractAddress: string, chainId: number, selector?: string): T | null {
+    const key = this.getMetadataKey(contractAddress, chainId, selector);
     const entry = this.metadataCache.get(key) as CacheEntry<T> | undefined;
 
     if (!entry) {
@@ -78,8 +79,8 @@ export class CacheManager {
   /**
    * Set cached metadata
    */
-  setMetadata<T>(contractAddress: string, chainId: number, data: T): void {
-    const key = this.getMetadataKey(contractAddress, chainId);
+  setMetadata<T>(contractAddress: string, chainId: number, data: T, selector?: string): void {
+    const key = this.getMetadataKey(contractAddress, chainId, selector);
     const tokens = this.estimateTokens(data);
 
     this.metadataCache.set(key, {

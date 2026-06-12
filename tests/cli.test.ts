@@ -50,7 +50,7 @@ describe('kaisign CLI', () => {
       verified: false,
       fullyClearSigned: false,
       safeToSign: false,
-      source: 'api-only',
+      source: 'local-metadata',
       intent: 'Contract interaction',
       functionName: 'unknown',
       warnings: ['No verified metadata'],
@@ -101,6 +101,50 @@ describe('kaisign CLI', () => {
       chainId: tx.chainId,
       value: tx.value
     }));
+  });
+
+  it('accepts plaintext payload as positional input with --json', async () => {
+    const result = {
+      decoded: true,
+      source: 'local-metadata',
+      intent: 'Transfer 10 USDC',
+      functionName: 'transfer',
+      warnings: [],
+      transaction: tx
+    };
+    const dep = deps(result);
+
+    const out = await runCli(['clear-sign', '--json', JSON.stringify(tx)], '', dep);
+
+    expect(out.exitCode).toBe(0);
+    expect(out.stderr).toBe('');
+    expect(dep.clearSignTransaction).toHaveBeenCalledWith(expect.objectContaining(tx));
+    expect(JSON.parse(out.stdout)).toMatchObject({ decoded: true, functionName: 'transfer' });
+  });
+
+  it('accepts interactive paste mode input from stdin', async () => {
+    const result = {
+      decoded: true,
+      source: 'local-metadata',
+      intent: 'Transfer 10 USDC',
+      functionName: 'transfer',
+      warnings: [],
+      transaction: tx
+    };
+    const wrapped = `{
+      "to": "${tx.to}",
+      "value": "0",
+      "chainId": 8453,
+      "data": "${tx.data.slice(0, 74)}\n        ${tx.data.slice(74)}"
+    }`;
+    const dep = deps(result);
+
+    const out = await runCli(['clear-sign', '--paste'], wrapped, dep);
+
+    expect(out.exitCode).toBe(0);
+    expect(out.stderr).toBe('');
+    expect(dep.clearSignTransaction).toHaveBeenCalledWith(expect.objectContaining(tx));
+    expect(out.stdout).toContain('Intent: Transfer 10 USDC');
   });
 
   it('fails with usage when required args are missing', async () => {

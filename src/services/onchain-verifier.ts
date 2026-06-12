@@ -24,7 +24,7 @@ import { cacheManager } from './cache-manager.js';
 
 export interface VerificationResult {
   verified: boolean;
-  source: 'leaf-verified' | 'api-only' | 'mismatch' | 'error';
+  source: 'leaf-verified' | 'local-metadata' | 'mismatch' | 'error';
   details: string | null;
   hash: string | null;
   onChainHash: string | null;
@@ -44,6 +44,18 @@ interface FunctionSelectors {
   getLatestSpecForBytecode: string;
   getAttestation: string;
   computeAttestationLeaf: string;
+}
+
+const FETCH_TIMEOUT_MS = Number(process.env.KAISIGN_MCP_FETCH_TIMEOUT_MS || 15000);
+
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export class OnChainVerifier {
@@ -91,7 +103,7 @@ export class OnChainVerifier {
   private async rpcCall(method: string, params: unknown[], rpcUrl?: string): Promise<string> {
     const url = rpcUrl ?? this.getRpcUrl();
 
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -115,10 +127,12 @@ export class OnChainVerifier {
    * Make an eth_call to a contract on Sepolia (where registry lives)
    */
   private async ethCallSepolia(to: string, data: string): Promise<string> {
+    const firstUrl = this.getRpcUrl();
     try {
       return await this.rpcCall('eth_call', [{ to, data }, 'latest']);
-    } catch {
+    } catch (e) {
       this.rotateRpc();
+      console.warn(`[OnChainVerifier] RPC ${firstUrl} failed (${(e as Error).message}), retrying via ${this.getRpcUrl()}`);
       return await this.rpcCall('eth_call', [{ to, data }, 'latest']);
     }
   }
@@ -261,7 +275,7 @@ export class OnChainVerifier {
 
     const result: VerificationResult = {
       verified: false,
-      source: 'api-only',
+      source: 'local-metadata',
       details: null,
       hash: null,
       onChainHash: null

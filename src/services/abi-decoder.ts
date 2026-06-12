@@ -654,6 +654,7 @@ export class TransactionDecoder {
       const metadata = await metadataService.getContractMetadata(contractAddress, chainId, selector);
 
       if (!metadata) {
+        const knownContract = metadataService.hasLocalContractMetadata(contractAddress, chainId);
         return {
           success: false,
           selector,
@@ -661,7 +662,9 @@ export class TransactionDecoder {
           rawParams: {},
           formatted: {},
           intent: 'Contract interaction',
-          error: 'No metadata found'
+          error: knownContract
+            ? `No local metadata for selector ${selector} on known contract ${contractAddress}`
+            : 'No metadata found'
         };
       }
 
@@ -709,7 +712,7 @@ export class TransactionDecoder {
       let intent = 'Contract interaction';
       const fieldInfo: Record<string, FieldDefinition> = {};
       const formats = metadata.display?.formats ?? {};
-      let format = formats[functionSignature ?? ''] ?? formats[legacyFunctionSignature ?? ''] ?? formats[functionName ?? ''];
+      let format = formats[selector] ?? formats[functionSignature ?? ''] ?? formats[legacyFunctionSignature ?? ''] ?? formats[functionName ?? ''];
       if (!format && functionName) {
         const prefix = `${functionName}(`;
         const matchingKey = Object.keys(formats).find(key => key.startsWith(prefix));

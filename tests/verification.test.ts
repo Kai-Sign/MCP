@@ -94,10 +94,10 @@ describe('OnChainVerifier', () => {
       expect(result).toHaveProperty('verified');
       expect(result).toHaveProperty('source');
       expect(result).toHaveProperty('details');
-      expect(['leaf-verified', 'api-only', 'mismatch', 'error']).toContain(result.source);
+      expect(['leaf-verified', 'local-metadata', 'mismatch', 'error']).toContain(result.source);
     });
 
-    it('returns api-only for unregistered contract', async () => {
+    it('returns local-metadata for unregistered contract', async () => {
       // Use a random address unlikely to be registered
       const result = await onChainVerifier.verifyMetadata(
         '0x1234567890123456789012345678901234567890',

@@ -416,7 +416,7 @@ describe('Proof 3: End-to-End Trust Flow', () => {
       console.log('   -> Metadata authenticity proven cryptographically');
     } else {
       console.log('1. REGISTRY ATTESTATION:', verification.source);
-      console.log('   -> Metadata from API (not on-chain verified)');
+      console.log('   -> Metadata from local files (not on-chain verified)');
     }
 
     if (decoded.success) {

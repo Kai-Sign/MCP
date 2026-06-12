@@ -4,9 +4,10 @@
  */
 
 import { z } from 'zod';
-import { recursiveCalldataDecoder, type RecursiveCallNode } from '../services/recursive-decoder.js';
+import { recursiveCalldataDecoder, type RecursiveCallNode, type ContractUsage } from '../services/recursive-decoder.js';
 import { onChainVerifier } from '../services/onchain-verifier.js';
 import { cacheManager } from '../services/cache-manager.js';
+import { computeSigningStatus, type ContractSummary, type ContractAttestation, type SigningStatus } from './signing-policy.js';
 
 export const decodeTransactionSchema = z.object({
   to: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
@@ -50,7 +51,13 @@ export interface DecodeTransactionResult {
     verified: boolean;
     source: string;
     details: string | null;
+    uid?: string;
+    metadataHash?: string;
+    revoked?: boolean;
+    idx?: number;
   };
+  contracts: ContractSummary[];
+  signing: SigningStatus;
   cacheStatus: 'hit' | 'miss';
   approximateTokensSaved?: number;
   hasUnknownInnerCalls: boolean;
@@ -59,6 +66,33 @@ export interface DecodeTransactionResult {
   cycleDetected: boolean;
   fullyClearSigned: boolean;
   error?: string;
+}
+
+/**
+ * Attempt registry attestation once per unique contract in the decoded tree.
+ * Results are cached by onChainVerifier, so repeated calls are cheap.
+ */
+export async function attestContracts(
+  contracts: ContractUsage[],
+  skipVerification: boolean
+): Promise<ContractSummary[]> {
+  return Promise.all(contracts.map(async (contract): Promise<ContractSummary> => {
+    let attestation: ContractAttestation;
+    if (skipVerification) {
+      attestation = contract.decoded ? 'local-metadata' : 'none';
+    } else {
+      try {
+        const result = await onChainVerifier.verifyMetadata(contract.address, contract.chainId);
+        if (result.attestationComponents?.revoked) attestation = 'revoked';
+        else if (result.verified && result.source === 'leaf-verified') attestation = 'leaf-verified';
+        else if (result.source === 'mismatch' || result.source === 'error') attestation = 'error';
+        else attestation = contract.decoded ? 'local-metadata' : 'none';
+      } catch {
+        attestation = 'error';
+      }
+    }
+    return { ...contract, attestation };
+  }));
 }
 
 /**
@@ -86,7 +120,11 @@ export async function decodeTransaction(
       verification = {
         verified: verificationResult.verified,
         source: verificationResult.source,
-        details: verificationResult.details
+        details: verificationResult.details,
+        uid: verificationResult.uid,
+        metadataHash: verificationResult.attestationComponents?.metadataHash,
+        revoked: verificationResult.attestationComponents?.revoked,
+        idx: verificationResult.attestationComponents?.idx
       };
     } catch (e) {
       verification = {
@@ -96,6 +134,18 @@ export async function decodeTransaction(
       };
     }
   }
+
+  // Attempt registry attestation for every unique contract in the call tree.
+  const contracts = await attestContracts(decoded.contracts, skipVerification);
+  const signing = computeSigningStatus({
+    decodedCalls: decoded.decodedCalls,
+    totalCalls: decoded.totalCalls,
+    contracts,
+    truncated: decoded.truncated,
+    cycleDetected: decoded.cycleDetected,
+    hasUnknownInnerCalls: decoded.hasUnknownInnerCalls,
+    error: decoded.root.error
+  });
 
   // Format params for output
   const params: DecodeTransactionResult['params'] = {};
@@ -148,6 +198,8 @@ export async function decodeTransaction(
       intent: cmd.intent
     })),
     verification,
+    contracts,
+    signing,
     cacheStatus,
     approximateTokensSaved,
     hasUnknownInnerCalls: decoded.hasUnknownInnerCalls,
