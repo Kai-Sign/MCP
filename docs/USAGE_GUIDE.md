@@ -140,8 +140,6 @@ Verification sources:
 The current registry address should be read from deployment constants before relying on it:
 
 - `metadata/deployment.js` in this repo when present
-- `kaisign-backend/backend/metadata/deployment.js`
-- `kaisign-backend/backend/deployment.py`
 
 Key registry methods:
 

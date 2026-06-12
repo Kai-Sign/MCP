@@ -40,7 +40,22 @@ export SEPOLIA_RPC_URL=https://your-sepolia-rpc
 
 The generic `clear_sign_payload` flow works with any built transaction payload. KaiSign MCP does not need transaction-builder credentials for local clear-signing.
 
-## 3. Smoke-test the local MCP server
+## 3. Generate missing local metadata safely
+
+If a contract is live/verified but missing from local metadata, generate a draft from Etherscan v2 ABI evidence instead of hand-typing selectors:
+
+```bash
+ETHERSCAN_API_KEY=*** npm run metadata:from-etherscan -- \
+  --chain=8453 \
+  --address=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
+  --output=metadata/tokens/usdc-base-draft.json
+```
+
+Use the real contract address and chain. The tool reads `ETHERSCAN_API_KEY` from the environment or MCP `.env`; resolves Etherscan proxy implementation ABIs when available; keeps the metadata bound to the requested proxy/contract address; checks `eth_getCode` through RPC; computes selectors from canonical signatures; and writes generic display formats for write functions.
+
+Treat the output as a selector-safe draft: replace generic `Review ... transaction` intents with useful human clear-signing text before submitting to the registry.
+
+## 4. Smoke-test the local MCP server
 
 The repo includes a local MCP client smoke test that starts `dist/index.js` over stdio and calls `clear_sign_payload` with a USDC transfer sample:
 
@@ -94,7 +109,7 @@ Raw serialized transaction payloads are also accepted:
 echo '{"rawTx":"0x02f8..."}' | node scripts/call-mcp-clear-sign-sample.mjs
 ```
 
-## 4. Connect a local MCP client over stdio
+## 5. Connect a local MCP client over stdio
 
 Most desktop/agent MCP clients should launch the stdio server directly:
 
@@ -163,7 +178,7 @@ If your Claude Code setup uses MCP config in `~/.claude/settings.json`, use the 
 }
 ```
 
-## 5. Use the tool
+## 6. Use the tool
 
 For integrations, call `clear_sign_payload`. It accepts direct, nested, aliased, or raw transaction payloads.
 
@@ -199,7 +214,7 @@ Required signing rule:
 4. Sign only the returned `transaction` object.
 5. If anything about the transaction changes, call `clear_sign_payload` again.
 
-## 6. Optional: run local HTTP MCP
+## 7. Optional: run local HTTP MCP
 
 The default local MCP mode is stdio. Use HTTP when a client expects a URL.
 

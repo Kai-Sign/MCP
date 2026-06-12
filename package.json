@@ -34,6 +34,7 @@
     "test": "vitest",
     "test:run": "vitest run",
     "cli": "node dist/cli.js",
+    "metadata:from-etherscan": "node scripts/generate-erc7730-from-etherscan.mjs",
     "mcp:sample": "node scripts/call-mcp-clear-sign-sample.mjs",
     "mcp:bridge": "scripts/start-browser-mcp-bridge.sh"
   },

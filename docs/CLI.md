@@ -92,6 +92,19 @@ JSON
 node dist/cli.js clear-sign --json < /tmp/tx.json
 ```
 
+## Generate local metadata from Etherscan
+
+If a payload fails because metadata is missing, create a draft from verified Etherscan ABI evidence:
+
+```bash
+ETHERSCAN_API_KEY=*** npm run metadata:from-etherscan -- \
+  --chain=1 \
+  --address=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
+  --output=metadata/tokens/usdc-draft.json
+```
+
+Then edit `display.formats` from generic review text into real clear-signing intent, build, and replay a real payload through `node dist/cli.js clear-sign --json`.
+
 ## Files used by the CLI
 
 Runtime entrypoint:

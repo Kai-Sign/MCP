@@ -96,6 +96,8 @@ For direct Bankrbot / LLM agent / wallet integration instructions, see [docs/AGE
 
 For the minimal command-line clear-signing tool, see [docs/CLI.md](docs/CLI.md). It supports pasted calldata (`--data` / `--calldata`), signed raw transactions (`--tx` / `--raw-tx`), and JSON stdin.
 
+To bootstrap missing local metadata from verified ABI evidence, use `npm run metadata:from-etherscan -- --chain=<id> --address=<contract> --output=metadata/...json` with `ETHERSCAN_API_KEY` set, then review the generated display text before registry submission.
+
 ### Prerequisites
 
 - Node.js >= 18.0.0

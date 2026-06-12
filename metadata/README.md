@@ -21,6 +21,28 @@ api-metadata/
 | 0x Exchange Proxy | `0xDef1C0ded9bec7F1a1670819833240f027b25EfF` | transformERC20, fillRfqOrder, fillLimitOrder |
 | CoW Protocol Settlement | `0x9008D19f58AAbD9eD0D60971565AA8510560ab41` | settle, setPreSignature, invalidateOrder |
 
+## Generate a draft from verified Etherscan ABI
+
+When local metadata is missing, start from verified ABI evidence instead of hand-typing selectors:
+
+```bash
+ETHERSCAN_API_KEY=... npm run metadata:from-etherscan -- \
+  --chain=1 \
+  --address=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
+  --output=metadata/tokens/usdc-draft.json
+```
+
+The generator:
+- calls Etherscan v2 `getsourcecode` / `getabi` with `chainid`
+- reads `ETHERSCAN_API_KEY` from the environment or MCP `.env`
+- keeps `context.contract.address` bound to the requested contract/proxy address
+- uses the implementation ABI when Etherscan reports a proxy implementation
+- verifies deployed bytecode with RPC unless `--no-rpc-code-check` is passed
+- computes every selector from the canonical ABI signature
+- emits generic `display.formats` for write functions as a reviewable skeleton
+
+This is not final clear-signing metadata. Review and replace generic intents/field labels before registry submission. For proxies, keep the metadata address as the proxy even when the ABI source is the implementation.
+
 ## Submission
 
 To submit these metadata files to the KaiSign API:

@@ -183,8 +183,6 @@ function buildMetadataDirs(configDir?: string): string[] {
   const candidates = [
     resolve(repoRoot, 'metadata'),
     resolve(process.cwd(), 'metadata'),
-    resolve(repoRoot, '..', 'kaisign-backend', 'backend', 'metadata'),
-    resolve(process.cwd(), '..', 'kaisign-backend', 'backend', 'metadata'),
     resolve(process.cwd(), 'backend', 'metadata')
   ];
 
