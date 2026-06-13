@@ -98,6 +98,8 @@ For the minimal command-line clear-signing tool, see [docs/CLI.md](docs/CLI.md).
 
 To bootstrap missing local metadata from verified ABI evidence, use `npm run metadata:from-etherscan -- --chain=<id> --address=<contract> --output=metadata/...json` with `ETHERSCAN_API_KEY` set, then review the generated display text before registry submission.
 
+For metadata submission setup, see [docs/SUBMISSION_KEYSTORE.md](docs/SUBMISSION_KEYSTORE.md). Recommended path: a `SubmissionSponsor` contract (`0x8a9d99D4EF98A342FeE36Bb80F62381906E02cA8`) posts the bond, so you only need Sepolia gas — `init-burner` then `submit-sponsored` posts the blob and submits from an agent-held encrypted burner. A direct path (bring your own bond-token-holding address, sign yourself) is also available. Registry: `0xf70D41afe5Ff76Ac3Bee86BCBda07450f3b590F0`.
+
 ### Prerequisites
 
 - Node.js >= 18.0.0

@@ -26,3 +26,6 @@ coverage/
 
 # Cache
 .cache/
+
+# Local KaiSign submission plans/state
+.kaisign/
