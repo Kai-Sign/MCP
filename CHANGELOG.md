@@ -15,14 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **7 MCP tools:**
   - `verify_contract_metadata` — Verify contract against on-chain registry
   - `decode_transaction` — Decode calldata into human-readable intent
-  - `validate_bankrbot_transaction` — Validate Bankrbot-built transactions
+  - `validate_transaction` — Validate transaction payloads
   - `get_clear_sign_prompt` — Formatted signing prompt for user confirmation
   - `get_cached_metadata` — Cache status inspection
   - `clear_cache` — Manual cache clearing
   - `prune_expired_cache` — Remove expired cache entries
-- **Bankrbot integration** — API client for natural language transaction building
 - **Clear signing flow** — Verification badge + decoded intent for transaction confirmation
 - **Multi-chain support** — Ethereum, Base, Optimism, Arbitrum, Sepolia
 - **Proxy detection** — EIP-1967, Diamond, and Safe proxy resolution
 - **Smart caching** — TTL-based caching with token savings estimation
-- **Test suite** — Verification tests, Bankrbot validation tests, trust proof tests
+- **Test suite** — Verification tests, transaction validation tests, trust proof tests

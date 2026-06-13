@@ -82,7 +82,7 @@ Parameters: [0x0b00, [...], 1706620672]
 ### Step 1: Verify Contract On-Chain
 
 ```typescript
-const result = await validateBankrbotTransaction({
+const result = await validateTransaction({
   to: "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD",
   data: "0x3593564c...",
   chainId: 8453,
@@ -216,7 +216,7 @@ MCP tools work by returning JSON responses to the LLM. The question isn't "what 
 
 ### KaiSign MCP Tool Response
 
-When the LLM calls `validate_bankrbot_transaction`, it receives:
+When the LLM calls `validate_transaction`, it receives:
 
 ```json
 {

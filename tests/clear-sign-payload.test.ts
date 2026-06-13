@@ -38,7 +38,7 @@ describe('clear sign payload normalization', () => {
             arguments: {
               connector: 'KaiSignMCP',
               maybe: {
-                bankr: {
+                builder: {
                   workflow: {
                     previewOnly: true,
                     neverBroadcast: true,

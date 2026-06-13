@@ -1,10 +1,10 @@
 /**
  * get_clear_sign_prompt tool
- * Returns a clear signing prompt for Bankrbot transactions
+ * Returns a clear signing prompt for transactions
  */
 
 import { z } from 'zod';
-import { validateBankrbotTransaction, type ValidateBankrbotTxResult } from './validate-bankrbot-tx.js';
+import { validateTransaction, type ValidateTransactionResult } from './validate-transaction.js';
 import { renderCallTree, renderStatusLines, type ContractSummary, type SigningStatus } from './signing-policy.js';
 
 export const getClearSignPromptSchema = z.object({
@@ -107,7 +107,7 @@ function getChainName(chainId: number): string {
 /**
  * Get verification badge based on source
  */
-function getVerificationBadge(source: ValidateBankrbotTxResult['source'], verified: boolean): string {
+function getVerificationBadge(source: ValidateTransactionResult['source'], verified: boolean): string {
   if (verified && source === 'leaf-verified') {
     return '✓ Verified';
   }
@@ -128,7 +128,7 @@ function buildDisplayText(
   to: string,
   chainId: number,
   warnings: string[],
-  validation: ValidateBankrbotTxResult
+  validation: ValidateTransactionResult
 ): string {
   const lines: string[] = [`${badge} Transaction`, ''];
 
@@ -171,7 +171,7 @@ function buildDisplayText(
 /**
  * Get a clear signing prompt for a transaction
  *
- * This tool wraps validateBankrbotTransaction and formats the output
+ * This tool wraps validateTransaction and formats the output
  * for user-friendly display in signing flows.
  *
  * @param input Transaction payload (to, data, chainId, value)
@@ -181,7 +181,7 @@ export async function getClearSignPrompt(input: ClearSignInput): Promise<ClearSi
   const parsed = getClearSignPromptSchema.parse(input);
 
   // Use existing validation logic
-  const validation = await validateBankrbotTransaction(parsed);
+  const validation = await validateTransaction(parsed);
 
   // Get verification badge
   const badge = getVerificationBadge(validation.source, validation.verified);

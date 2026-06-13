@@ -28,7 +28,6 @@ We will acknowledge receipt within 48 hours and aim to provide a fix within 7 da
 
 - The KaiSign Registry smart contract (separate repository)
 - Third-party RPC providers
-- Bankrbot API
 - Claude/MCP protocol itself
 
 ## Security Model

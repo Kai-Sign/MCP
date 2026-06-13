@@ -48,8 +48,6 @@ export const RPC_URLS: Record<number, string[]> = {
 // Local ERC-7730 metadata directory. MCP is local-first; do not depend on the hosted API.
 export const KAISIGN_METADATA_DIR = process.env.KAISIGN_METADATA_DIR;
 
-// Bankrbot API
-export const BANKR_API_URL = process.env.BANKR_API_URL || 'https://api.bankr.bot';
 
 // Cache settings
 export const CACHE_TTL = 300000; // 5 minutes

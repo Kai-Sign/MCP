@@ -51,8 +51,6 @@ npm test
 # Run tests once (no watch mode)
 npm run test:run
 
-# Run with Bankrbot integration tests (requires API key)
-BANKR_API_KEY=your_key BANKR_TEST=1 npm run test:run
 ```
 
 ## Making Changes

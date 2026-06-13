@@ -1,6 +1,6 @@
 # KaiSign MCP Agent Integration
 
-Direct instructions for using KaiSign MCP from Bankrbot, a generic LLM agent, a wallet, a router API, or any transaction builder.
+Direct instructions for using KaiSign MCP from a generic LLM agent, a wallet, a router API, or any transaction builder.
 
 KaiSign MCP is not a transaction builder and does not sign transactions. It takes a built transaction payload and returns clear-signing data before signing/broadcasting.
 
@@ -158,55 +158,6 @@ Meaning:
 - `clearSign.warnings`: display or enforce these before signing.
 - `signingPolicy.signOriginalTransactionOnly`: never sign a modified transaction from the model; sign this returned transaction only.
 
-## Bankrbot integration
-
-Bankrbot does not need an LLM agent wrapper to use KaiSign MCP. Bankrbot only needs an MCP client or pre-sign hook.
-
-Bankrbot-side required behavior:
-
-1. Build the transaction from the user request.
-2. Before signing or broadcasting, call KaiSign MCP `clear_sign_payload` with the built transaction.
-3. Show `clearSign.displayText` to the user or enforce policy.
-4. If approved, sign `transaction` from the MCP response.
-5. Broadcast via Bankrbot's normal broadcaster.
-
-Bankrbot pre-sign hook pseudocode:
-
-```ts
-async function beforeSignOrBroadcast(builtTx) {
-  const result = await mcp.callTool('kaisign', 'clear_sign_payload', {
-    transaction: builtTx
-  });
-
-  const { transaction, clearSign, signingPolicy } = JSON.parse(result.content[0].text);
-
-  if (clearSign.warnings.length > 0) {
-    showWarnings(clearSign.warnings);
-  }
-
-  if (signingPolicy.mustShowToUser) {
-    const approved = await askUserToConfirm(clearSign.displayText);
-    if (!approved) throw new Error('User rejected transaction');
-  }
-
-  if (!clearSign.verified || !clearSign.fullyDecoded) {
-    const approved = await askUserToConfirm(
-      `${clearSign.displayText}\n\nTransaction is not fully KaiSign verified. Continue?`
-    );
-    if (!approved) throw new Error('User rejected unverified transaction');
-  }
-
-  return transaction;
-}
-```
-
-Bankrbot system/developer instruction:
-
-```text
-Before signing or broadcasting any transaction, call KaiSign MCP tool `clear_sign_payload` with the built transaction payload. Show `clearSign.displayText` to the user. If `clearSign.warnings` is non-empty, show all warnings. If `clearSign.verified` is false or `clearSign.fullyDecoded` is false, require explicit user confirmation. Sign only the returned `transaction` object. Never sign or broadcast before KaiSign MCP returns.
-```
-
-If Bankrbot currently auto-signs or auto-broadcasts immediately, add the KaiSign call as a pre-sign/pre-broadcast hook. If a pre-sign hook cannot be added, Bankrbot cannot provide pre-sign clear-signing; only post-broadcast inspection is possible.
 
 ## Generic LLM agent integration
 

@@ -31,7 +31,7 @@ User prompt: "swap 0.01 ETH to USDC"
         │
         ▼
 ┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
-│   Bankrbot API  │────▶│  KaiSign MCP Server   │────▶│  KaiSign Registry   │
+│ Transaction API │────▶│  KaiSign MCP Server   │────▶│  KaiSign Registry   │
 │  (builds tx)    │     │  (verifies + decodes) │     │  (Sepolia on-chain) │
 └─────────────────┘     └──────────────────────┘     └─────────────────────┘
                                 │
@@ -52,7 +52,7 @@ User prompt: "swap 0.01 ETH to USDC"
 
 - **On-chain verification** — Metadata verified against the KaiSign Registry (Sepolia), not trusted from external APIs
 - **Transaction decoding** — Raw calldata decoded into human-readable intent using ERC-7730 metadata
-- **Bankrbot integration** — Validate transactions built by [Bankrbot](https://bankr.bot) from natural language
+- **Transaction-builder integration** — Validate unsigned transactions before signing or broadcasting
 - **Clear signing prompts** — Formatted transaction confirmations with verification badges
 - **Selector lookup for builders** — Agents can fetch canonical function signatures/selectors by exact address + chain before encoding, instead of relying on model memory
 - **Multi-chain support** — Ethereum, Base, Optimism, Arbitrum, and Sepolia
@@ -92,7 +92,7 @@ These contracts have on-chain attested metadata in the KaiSign Registry and can 
 
 For a step-by-step local MCP setup, smoke test, Claude config, and optional HTTP/tunnel setup, see [docs/LOCAL_MCP_TUTORIAL.md](docs/LOCAL_MCP_TUTORIAL.md).
 
-For direct Bankrbot / LLM agent / wallet integration instructions, see [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md).
+For direct LLM agent / wallet / router integration instructions, see [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md).
 
 For the minimal command-line clear-signing tool, see [docs/CLI.md](docs/CLI.md). It supports pasted calldata (`--data` / `--calldata`), signed raw transactions (`--tx` / `--raw-tx`), and JSON stdin.
 
@@ -123,9 +123,6 @@ cp .env.example .env
 ```
 
 ```env
-# Required for Bankrbot integration
-BANKR_API_KEY=your_bankr_api_key
-
 # Optional: Custom RPC URLs (public defaults are included)
 ETH_RPC_URL=https://your-eth-rpc.com
 BASE_RPC_URL=https://your-base-rpc.com
@@ -153,9 +150,6 @@ Add the KaiSign MCP server to your Claude configuration:
     "kaisign": {
       "command": "node",
       "args": ["/absolute/path/to/MCP/dist/index.js"],
-      "env": {
-        "BANKR_API_KEY": "your_bankr_api_key"
-      }
     }
   }
 }
@@ -169,9 +163,6 @@ Add the KaiSign MCP server to your Claude configuration:
     "kaisign": {
       "command": "node",
       "args": ["/absolute/path/to/MCP/dist/index.js"],
-      "env": {
-        "BANKR_API_KEY": "your_bankr_api_key"
-      }
     }
   }
 }
@@ -231,12 +222,12 @@ Input: {
 }
 ```
 
-### Tool 3: Validate Bankrbot Transaction
+### Tool 3: Validate Transaction
 
-Validate a transaction built by Bankrbot against the KaiSign Registry. This is the primary tool for the agent signing flow.
+Validate a transaction payload against the KaiSign Registry. Prefer `clear_sign_payload` for the full pre-sign flow.
 
 ```
-Tool: validate_bankrbot_transaction
+Tool: validate_transaction
 Input: {
   "to": "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD",
   "data": "0x3593564c...",
@@ -263,7 +254,7 @@ Input: {
 
 ### Tool 4: Clear Sign Any Tx-Builder Payload
 
-Generic pre-sign hook for any transaction builder: Bankrbot, an LLM agent, a wallet, a router API, or custom code. Use this when the builder returns direct `{to,data,value,chainId}`, nested `{transaction:{...}}` / `{tx:{...}}`, calldata aliases, or a serialized raw transaction.
+Generic pre-sign hook for any transaction builder: an LLM agent, a wallet, a router API, or custom code. Use this when the builder returns direct `{to,data,value,chainId}`, nested `{transaction:{...}}` / `{tx:{...}}`, calldata aliases, or a serialized raw transaction.
 
 ```
 Tool: clear_sign_payload
@@ -378,81 +369,6 @@ Tool: clear_cache
 Tool: prune_expired_cache
 ```
 
-## Using with Bankrbot
-
-[Bankrbot](https://bankr.bot) is an LLM-based transaction building agent that accepts natural language prompts and builds Ethereum transactions.
-
-### End-to-End Flow (User-in-the-Loop)
-
-1. **User says:** "swap 0.01 ETH to USDC on Base"
-2. **Bankrbot** builds the unsigned transaction (calldata, target contract, value)
-3. **KaiSign MCP** clear-signs the built payload via `clear_sign_payload` (or `get_clear_sign_prompt` for canonical tx shape)
-4. **KaiSign MCP** verifies the contract against the on-chain registry
-5. **KaiSign MCP** decodes the calldata into human-readable intent
-6. **User sees:** "Swap 0.01 ETH → min 25.50 USDC via Uniswap Universal Router ✓ Verified"
-7. **User confirms** and signs the original transaction
-8. **Signed tx is broadcast** through wallet/RPC/relay/any medium
-
-### Autonomous Agent Flow
-
-The same flow works without user confirmation — the LLM verifies and decides on its own:
-
-1. **A transaction builder** (Bankrbot, an LLM agent, wallet, router API, or custom code) builds unsigned tx payload from the request
-2. **The caller** calls `clear_sign_payload` on KaiSign MCP → verifies contract metadata on-chain + decodes intent
-3. **The caller** checks: `clearSign.verified: true`, `clearSign.fullyDecoded: true`, no warnings, intent matches original request
-4. **The caller** proceeds to sign/broadcast the returned `transaction`, or halts based on verification/policy result
-
-```
-LLM prompt: "swap 0.01 ETH to USDC on Base"
-        │
-        ▼
-┌─────────────────┐     ┌──────────────────────┐     ┌──────────────┐
-│   Bankrbot API  │────▶│  KaiSign MCP Server   │────▶│  LLM decides │
-│  (unsigned tx)  │     │  (verify + decode)    │     │  (proceed?)  │
-└─────────────────┘     └──────────────────────┘     └──────────────┘
-```
-
-This is useful for fully autonomous agents that need to transact without human oversight while still maintaining cryptographic trust guarantees. The LLM never signs a transaction it can't independently verify.
-
-### Setup
-
-1. Get a Bankrbot API key from [bankr.bot](https://bankr.bot)
-2. Set `BANKR_API_KEY` in your environment
-3. Connect the KaiSign MCP server to Claude
-4. Ask Claude to build and verify transactions using natural language
-
-### Example: User-in-the-Loop
-
-```
-You: "Swap $10 of ETH to USDC on Base"
-
-Claude: I'll build this transaction using Bankrbot and verify it with KaiSign.
-
-[Calls validate_bankrbot_transaction]
-
-✓ Verified Transaction
-Swap 0.01 ETH → min 25.50 USDC via Uniswap Universal Router
-
-Contract: 0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD (Base)
-Value: 0.01 ETH
-Verification: On-chain leaf-verified
-
-Would you like to proceed with this transaction?
-```
-
-### Example: Autonomous Agent
-
-```
-Agent: Build swap 0.01 ETH to USDC on Base
-  → Bankrbot returns unsigned tx {to, data, value, chainId}
-
-Agent: Verify transaction with KaiSign
-  → verified: true, source: leaf-verified
-  → intent: "Swap 0.01 ETH → min 25.50 USDC via Uniswap Universal Router"
-  → warnings: []
-
-Agent: Verification passed, intent matches request → proceeding
-```
 
 ## Architecture
 
@@ -466,11 +382,10 @@ src/
 │   ├── metadata-service.ts       # ERC-7730 metadata fetching + proxy detection
 │   ├── abi-decoder.ts            # Transaction calldata decoding engine
 │   ├── cache-manager.ts          # TTL-based caching with token estimation
-│   └── bankrbot-client.ts        # Bankrbot API client
 └── tools/
     ├── verify-metadata.ts        # verify_contract_metadata tool
     ├── decode-transaction.ts     # decode_transaction tool
-    ├── validate-bankrbot-tx.ts   # validate_bankrbot_transaction tool
+    ├── validate-transaction.ts   # validate_transaction tool
     ├── clear-sign-payload.ts     # clear_sign_payload generic tx-builder pre-sign hook
     ├── get-function-selectors.ts # get_function_selectors exact-address ABI selector lookup
     ├── get-clear-sign-prompt.ts  # get_clear_sign_prompt tool
@@ -517,16 +432,12 @@ Tests use [Vitest](https://vitest.dev) and make real RPC calls to verify on-chai
 # Standard tests (verification + validation)
 npm test
 
-# With Bankrbot integration (requires API key, consumes real funds)
-BANKR_API_KEY=your_key BANKR_TEST=1 npm run test:run
 ```
 
 ### Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BANKR_API_KEY` | For Bankrbot | — | Bankrbot API key |
-| `BANKR_API_URL` | No | `https://api.bankr.bot` | Bankrbot API endpoint |
 | `KAISIGN_METADATA_DIR` | No | auto-detects repo-local `metadata/` | Local ERC-7730 metadata directory |
 | `ETH_RPC_URL` | No | Public RPC | Ethereum Mainnet RPC |
 | `BASE_RPC_URL` | No | Public RPC | Base RPC |
@@ -549,6 +460,5 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 ## Links
 
 - [KaiSign Registry (Sepolia)](https://sepolia.etherscan.io/address/0xC203e8C22eFCA3C9218a6418f6d4281Cb7744dAa)
-- [Bankrbot](https://bankr.bot)
 - [Model Context Protocol](https://modelcontextprotocol.io)
 - [ERC-7730 Specification](https://eips.ethereum.org/EIPS/eip-7730)

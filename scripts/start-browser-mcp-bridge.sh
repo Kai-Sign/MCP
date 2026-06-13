@@ -17,7 +17,7 @@ print_config() {
   echo "KaiSign MCP local:  http://127.0.0.1:${PORT}/mcp"
   echo "KaiSign MCP public: ${url}/mcp"
   echo
-  echo "Frontend LLM / Bankrbot MCP config:"
+  echo "Frontend LLM MCP config:"
   echo "Name: KaiSignMCP"
   echo "URL: ${url}/mcp"
   echo "Transport: Streamable HTTP"

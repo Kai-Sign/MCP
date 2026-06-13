@@ -16,7 +16,7 @@ import {
 import { verifyContractMetadata, verifyMetadataSchema } from './tools/verify-metadata.js';
 import { decodeTransaction, decodeTransactionSchema } from './tools/decode-transaction.js';
 import { getCachedMetadata, getCachedMetadataSchema, clearCache, pruneExpiredCache } from './tools/get-cached-metadata.js';
-import { validateBankrbotTransaction, validateBankrbotTxSchema } from './tools/validate-bankrbot-tx.js';
+import { validateTransaction, validateTransactionSchema } from './tools/validate-transaction.js';
 import { getClearSignPrompt, getClearSignPromptSchema } from './tools/get-clear-sign-prompt.js';
 import { clearSignPayload, clearSignPayloadSchema } from './tools/clear-sign-payload.js';
 import { getFunctionSelectors, getFunctionSelectorsSchema } from './tools/get-function-selectors.js';
@@ -164,14 +164,14 @@ Returns:
     }
   },
   {
-    name: 'validate_bankrbot_transaction',
-    description: `Validate a transaction payload from Bankrbot against KaiSign Registry. Prefer clear_sign_payload — it wraps this validation and adds payload normalization, display text, and signing policy.
+    name: 'validate_transaction',
+    description: `Validate a transaction payload against KaiSign Registry. Prefer clear_sign_payload — it wraps this validation and adds payload normalization, display text, and signing policy.
 
-This tool is designed for the agent signing flow:
-1. Bankrbot builds a transaction from natural language (e.g., "swap $10 ETH to USDC")
+This tool is designed for signing flows:
+1. A transaction builder creates an unsigned transaction payload
 2. This tool validates the transaction against KaiSign's on-chain verified metadata
 3. If verified (source: 'leaf-verified'), the decoded intent is trustworthy
-4. User can confidently sign knowing the transaction matches their intent
+4. User or policy can approve signing knowing the transaction matches intent
 
 Returns:
 - verified: true if contract has KaiSign-verified metadata
@@ -253,7 +253,7 @@ Use when a single MCP call with full calldata is too large for the MCP proxy/gat
   },
   {
     name: 'clear_sign_payload',
-    description: `PRIMARY TOOL — use this for any transaction clear-signing, decoding, or safety question. Clear-signs any transaction payload from a transaction builder: Bankrbot, an LLM agent, wallet request, router API, custom code, or raw transaction.
+    description: `PRIMARY TOOL — use this for any transaction clear-signing, decoding, or safety question. Clear-signs any transaction payload from a transaction builder: LLM agent, wallet request, router API, custom code, or raw transaction.
 
 Returns a unified signing block { verdict: safe|review|reject, reason, decodedCalls/totalCalls, attestedContracts/totalContracts }, a per-contract registry-attestation summary, a rendered call tree in displayText, and a signing policy. 'review' means fully decoded but registry attestation pending — show to the user; 'reject' means do not sign.
 
@@ -484,9 +484,9 @@ export async function handleMcpToolCall(name: string, args: unknown) {
         return textResult(await pruneExpiredCache());
       }
 
-      case 'validate_bankrbot_transaction': {
-        const input = validateBankrbotTxSchema.parse(args);
-        return textResult(await validateBankrbotTransaction(input));
+      case 'validate_transaction': {
+        const input = validateTransactionSchema.parse(args);
+        return textResult(await validateTransaction(input));
       }
 
       case 'clear_sign_payload': {

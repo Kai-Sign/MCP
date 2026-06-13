@@ -1,7 +1,7 @@
 /**
  * clear_sign_payload helper/tool
  *
- * Normalizes transaction payloads produced by tx builders/LLMs/Bankrbot-like agents
+ * Normalizes transaction payloads produced by tx builders, LLM agents, wallets, router APIs, or custom code
  * into the canonical KaiSign transaction shape, then returns clear-signing data for
  * the exact original transaction the user/agent must sign.
  */

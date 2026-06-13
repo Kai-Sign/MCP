@@ -1,6 +1,6 @@
 /**
- * validate_bankrbot_transaction tool
- * Validates transaction payloads from Bankrbot against KaiSign Registry
+ * validate_transaction tool
+ * Validates transaction payloads against KaiSign Registry
  */
 
 import { z } from 'zod';
@@ -9,16 +9,16 @@ import { onChainVerifier } from '../services/onchain-verifier.js';
 import { attestContracts } from './decode-transaction.js';
 import { computeSigningStatus, type ContractSummary, type SigningStatus } from './signing-policy.js';
 
-export const validateBankrbotTxSchema = z.object({
+export const validateTransactionSchema = z.object({
   to: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
   data: z.string().regex(/^0x[a-fA-F0-9]+$/, 'Invalid calldata hex string'),
   chainId: z.number().int().positive().default(8453), // Default to Base
   value: z.string().default('0')
 });
 
-export type ValidateBankrbotTxInput = z.infer<typeof validateBankrbotTxSchema>;
+export type ValidateTransactionInput = z.infer<typeof validateTransactionSchema>;
 
-export interface ValidateBankrbotTxResult {
+export interface ValidateTransactionResult {
   /** Whether the outer contract has leaf-verified KaiSign metadata */
   verified: boolean;
 
@@ -81,23 +81,23 @@ function hasCriticalWarning(warnings: string[]): boolean {
 }
 
 /**
- * Validate a transaction payload from Bankrbot
+ * Validate a transaction payload
  *
  * This tool is designed for the signing flow:
- * 1. Bankrbot builds transaction from natural language
+ * 1. A transaction builder creates an unsigned transaction payload
  * 2. This tool validates the transaction against KaiSign registry
  * 3. If verified, user can confidently sign
  */
-export async function validateBankrbotTransaction(
-  input: ValidateBankrbotTxInput
-): Promise<ValidateBankrbotTxResult> {
-  const { to, data, chainId, value } = validateBankrbotTxSchema.parse(input);
+export async function validateTransaction(
+  input: ValidateTransactionInput
+): Promise<ValidateTransactionResult> {
+  const { to, data, chainId, value } = validateTransactionSchema.parse(input);
 
   const contractAddress = to.toLowerCase();
   const warnings: string[] = [];
   const selector = data.length >= 10 ? data.slice(0, 10) : '0x';
 
-  const result: ValidateBankrbotTxResult = {
+  const result: ValidateTransactionResult = {
     verified: false,
     source: 'unverified',
     intent: 'Unknown transaction',
@@ -125,7 +125,7 @@ export async function validateBankrbotTransaction(
     const verificationResult = await onChainVerifier.verifyMetadata(contractAddress, chainId);
 
     result.verified = verificationResult.verified && verificationResult.source === 'leaf-verified';
-    result.source = verificationResult.source as ValidateBankrbotTxResult['source'];
+    result.source = verificationResult.source as ValidateTransactionResult['source'];
 
     if (verificationResult.uid || verificationResult.attestationComponents) {
       result.verification = {
