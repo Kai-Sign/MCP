@@ -20,6 +20,28 @@ import { validateTransaction, validateTransactionSchema } from './tools/validate
 import { getClearSignPrompt, getClearSignPromptSchema } from './tools/get-clear-sign-prompt.js';
 import { clearSignPayload, clearSignPayloadSchema } from './tools/clear-sign-payload.js';
 import { getFunctionSelectors, getFunctionSelectorsSchema } from './tools/get-function-selectors.js';
+import {
+  getSubmissionBurnerStatus,
+  getSubmissionBurnerStatusSchema,
+  getSubmissionScopeStatus,
+  getSubmissionScopeStatusSchema,
+  initSubmissionBurner,
+  initSubmissionBurnerSchema,
+  initSubmissionScope,
+  initSubmissionScopeSchema,
+  prepareDirectCommit,
+  prepareDirectCommitSchema,
+  prepareDirectReveal,
+  prepareDirectRevealSchema,
+  prepareDirectVote,
+  prepareDirectVoteSchema,
+  prepareSponsoredCommit,
+  prepareSponsoredCommitSchema,
+  prepareSponsoredReveal,
+  prepareSponsoredRevealSchema,
+  submitSponsoredMetadata,
+  submitSponsoredMetadataSchema
+} from './tools/submit-metadata.js';
 import { putPayloadChunk } from './services/payload-store.js';
 
 // Create MCP server
@@ -444,6 +466,326 @@ Use this when presenting transactions to users for signing. The response include
       },
       required: ['to', 'data']
     }
+  },
+  {
+    name: 'init_submission_burner',
+    description: `Create an encrypted gas-only burner for sponsored ERC-7730 metadata submissions.
+
+This is the default setup step for the full sponsored submission workflow. It writes an encrypted
+burner keystore and creates a password file if one does not already exist. Fund the returned
+submitterAddress with Sepolia ETH only; the SubmissionSponsor supplies the bond token.
+
+After funding, call get_submission_burner_status and then submit_sponsored_metadata.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        passwordFile: {
+          type: 'string',
+          description: 'Local password file to create/use for encrypting the burner',
+          default: '.kaisign/burner-password.txt'
+        },
+        burnerFile: {
+          type: 'string',
+          description: 'Local encrypted burner keystore path',
+          default: '.kaisign/burner.json'
+        },
+        sponsor: {
+          type: 'string',
+          description: 'Optional SubmissionSponsor address override',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        },
+        force: {
+          type: 'boolean',
+          description: 'Overwrite an existing burner keystore',
+          default: false
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_submission_burner_status',
+    description: `Check the configured ERC-7730 sponsored-submission burner without decrypting it.
+
+Returns the burner submitter address, sponsor, Sepolia balance, and whether it is funded.
+Use this before submit_sponsored_metadata.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        burnerFile: {
+          type: 'string',
+          description: 'Local encrypted burner keystore path',
+          default: '.kaisign/burner.json'
+        },
+        rpcUrl: {
+          type: 'string',
+          description: 'Optional Sepolia RPC URL override'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'submit_sponsored_metadata',
+    description: `Run the full sponsored ERC-7730 metadata submission workflow.
+
+This is the default full-submission path. It posts the EIP-4844 blob from the configured burner EOA, calls SubmissionSponsor.sponsoredCommit,
+waits for the minimum reveal delay, and calls SubmissionSponsor.sponsoredReveal. It requires a funded
+Sepolia gas-only burner created by init_submission_burner. A smart account cannot post the blob itself;
+for smart-account commit/reveal flows use prepare_sponsored_commit and provide an externally posted blob hash.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        metadata: {
+          type: 'string',
+          description: 'Path to the local ERC-7730 metadata JSON file'
+        },
+        passwordFile: {
+          type: 'string',
+          description: 'Password file for decrypting the burner',
+          default: '.kaisign/burner-password.txt'
+        },
+        burnerFile: {
+          type: 'string',
+          description: 'Encrypted burner keystore path',
+          default: '.kaisign/burner.json'
+        },
+        blobHash: {
+          type: 'string',
+          description: 'Optional already-posted EIP-4844 versioned blob hash',
+          pattern: '^0x[a-fA-F0-9]{64}$'
+        },
+        targetAddress: {
+          type: 'string',
+          description: 'Optional target deployment address when metadata has multiple deployments',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        },
+        sponsor: {
+          type: 'string',
+          description: 'Optional SubmissionSponsor address override',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        }
+      },
+      required: ['metadata'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'init_submission_scope',
+    description: `Create a keyless public scope manifest for preparing smart-account ERC-7730 submission transactions.
+
+This stores only the submitter address and allowed submission selectors. It does not create or store
+signing material. Use prepare_sponsored_commit and prepare_sponsored_reveal with the manifest.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: {
+          type: 'string',
+          description: 'Submitter or smart-account address that will sign/execute prepared transactions',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        },
+        output: {
+          type: 'string',
+          description: 'Output path for the keyless scope manifest',
+          default: '.kaisign/submission-keystore.json'
+        }
+      },
+      required: ['address'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_submission_scope_status',
+    description: `Check whether a scoped direct submitter address is eligible for direct ERC-7730 registry submission.
+
+Direct submission is not the default. Use it only when this tool reports eligible=true, meaning the
+address has Sepolia gas and at least minBond of the permissioned KaiSign bond token. If eligible=false,
+use the sponsored smart-account/default workflow instead.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        keystore: {
+          type: 'string',
+          description: 'Keyless scope manifest created by init_submission_scope',
+          default: '.kaisign/submission-keystore.json'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'prepare_sponsored_commit',
+    description: `Prepare an unsigned smart-account-callable SubmissionSponsor.sponsoredCommit transaction.
+
+Use this when a smart account should execute the commit/reveal calls. The EIP-4844 blob still must be
+posted by an EOA or backend; pass blobHash when the blob was posted externally. The tool writes a state
+file used by prepare_sponsored_reveal.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        metadata: {
+          type: 'string',
+          description: 'Path to the local ERC-7730 metadata JSON file'
+        },
+        keystore: {
+          type: 'string',
+          description: 'Keyless scope manifest created by init_submission_scope',
+          default: '.kaisign/submission-keystore.json'
+        },
+        output: {
+          type: 'string',
+          description: 'Optional output path for the submission state file'
+        },
+        blobHash: {
+          type: 'string',
+          description: 'Optional already-posted EIP-4844 versioned blob hash',
+          pattern: '^0x[a-fA-F0-9]{64}$'
+        },
+        targetAddress: {
+          type: 'string',
+          description: 'Optional target deployment address when metadata has multiple deployments',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        },
+        sponsor: {
+          type: 'string',
+          description: 'Optional SubmissionSponsor address override',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        }
+      },
+      required: ['metadata'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'prepare_direct_commit',
+    description: `Prepare an unsigned direct registry commitSpec transaction only if the scoped address has the permissioned bond token.
+
+This tool first checks get_submission_scope_status internally. If the address lacks Sepolia gas or minBond
+of the permissioned bond token, it refuses and tells the caller to use the sponsored smart-account/default path.
+The EIP-4844 blob still must be posted by an EOA/backend; pass blobHash when already posted.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        metadata: {
+          type: 'string',
+          description: 'Path to the local ERC-7730 metadata JSON file'
+        },
+        keystore: {
+          type: 'string',
+          description: 'Keyless scope manifest created by init_submission_scope',
+          default: '.kaisign/submission-keystore.json'
+        },
+        output: {
+          type: 'string',
+          description: 'Optional output path for the submission state file'
+        },
+        blobHash: {
+          type: 'string',
+          description: 'Optional already-posted EIP-4844 versioned blob hash',
+          pattern: '^0x[a-fA-F0-9]{64}$'
+        },
+        targetAddress: {
+          type: 'string',
+          description: 'Optional target deployment address when metadata has multiple deployments',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        }
+      },
+      required: ['metadata'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'prepare_direct_reveal',
+    description: `Prepare unsigned direct registry reveal transactions only if the scoped address has the permissioned bond token.
+
+This emits the exact bond-token approval plus revealSpec transaction. It refuses when the scoped address
+is not eligible, so callers fall back to the sponsored smart-account/default workflow.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        state: {
+          type: 'string',
+          description: 'Submission state file from prepare_direct_commit'
+        },
+        commitmentId: {
+          type: 'string',
+          description: 'Commitment id emitted by the commit transaction',
+          pattern: '^0x[a-fA-F0-9]{64}$'
+        },
+        keystore: {
+          type: 'string',
+          description: 'Keyless scope manifest created by init_submission_scope',
+          default: '.kaisign/submission-keystore.json'
+        },
+        tokenAmount: {
+          type: 'string',
+          description: 'Optional explicit bond token amount; defaults to registry minBond'
+        }
+      },
+      required: ['state', 'commitmentId'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'prepare_direct_vote',
+    description: `Prepare unsigned direct Reality.eth VALID vote transactions only if the scoped address has the permissioned bond token.
+
+This emits the exact bond-token approval plus submitAnswerERC20 transaction. It refuses when the scoped
+address is not eligible, so callers should use the sponsored/default path and avoid direct voting.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        questionId: {
+          type: 'string',
+          description: 'Reality.eth question id from reveal',
+          pattern: '^0x[a-fA-F0-9]{64}$'
+        },
+        keystore: {
+          type: 'string',
+          description: 'Keyless scope manifest created by init_submission_scope',
+          default: '.kaisign/submission-keystore.json'
+        },
+        tokens: {
+          type: 'string',
+          description: 'Optional vote bond amount; defaults according to current Reality.eth bond'
+        }
+      },
+      required: ['questionId'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'prepare_sponsored_reveal',
+    description: `Prepare an unsigned smart-account-callable SubmissionSponsor.sponsoredReveal transaction.
+
+Call this after the sponsored commit transaction is mined and you have its commitmentId. It uses the
+state file written by prepare_sponsored_commit.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        state: {
+          type: 'string',
+          description: 'Submission state file from prepare_sponsored_commit'
+        },
+        commitmentId: {
+          type: 'string',
+          description: 'Commitment id emitted by the commit transaction',
+          pattern: '^0x[a-fA-F0-9]{64}$'
+        },
+        keystore: {
+          type: 'string',
+          description: 'Keyless scope manifest created by init_submission_scope',
+          default: '.kaisign/submission-keystore.json'
+        },
+        sponsor: {
+          type: 'string',
+          description: 'Optional SubmissionSponsor address override',
+          pattern: '^0x[a-fA-F0-9]{40}$'
+        }
+      },
+      required: ['state', 'commitmentId'],
+      additionalProperties: false
+    }
   }
 ];
 
@@ -506,6 +848,56 @@ export async function handleMcpToolCall(name: string, args: unknown) {
       case 'get_clear_sign_prompt': {
         const input = getClearSignPromptSchema.parse(args);
         return textResult(await getClearSignPrompt(input));
+      }
+
+      case 'init_submission_burner': {
+        const input = initSubmissionBurnerSchema.parse(args);
+        return textResult(await initSubmissionBurner(input));
+      }
+
+      case 'get_submission_burner_status': {
+        const input = getSubmissionBurnerStatusSchema.parse(args);
+        return textResult(await getSubmissionBurnerStatus(input));
+      }
+
+      case 'submit_sponsored_metadata': {
+        const input = submitSponsoredMetadataSchema.parse(args);
+        return textResult(await submitSponsoredMetadata(input));
+      }
+
+      case 'init_submission_scope': {
+        const input = initSubmissionScopeSchema.parse(args);
+        return textResult(await initSubmissionScope(input));
+      }
+
+      case 'get_submission_scope_status': {
+        const input = getSubmissionScopeStatusSchema.parse(args);
+        return textResult(await getSubmissionScopeStatus(input));
+      }
+
+      case 'prepare_sponsored_commit': {
+        const input = prepareSponsoredCommitSchema.parse(args);
+        return textResult(await prepareSponsoredCommit(input));
+      }
+
+      case 'prepare_direct_commit': {
+        const input = prepareDirectCommitSchema.parse(args);
+        return textResult(await prepareDirectCommit(input));
+      }
+
+      case 'prepare_direct_reveal': {
+        const input = prepareDirectRevealSchema.parse(args);
+        return textResult(await prepareDirectReveal(input));
+      }
+
+      case 'prepare_direct_vote': {
+        const input = prepareDirectVoteSchema.parse(args);
+        return textResult(await prepareDirectVote(input));
+      }
+
+      case 'prepare_sponsored_reveal': {
+        const input = prepareSponsoredRevealSchema.parse(args);
+        return textResult(await prepareSponsoredReveal(input));
       }
 
       default:
