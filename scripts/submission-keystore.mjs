@@ -352,8 +352,10 @@ async function buildBlob(rawMetadata) {
   const commitment = cKzg.blobToKzgCommitment(blob);
   const proof = cKzg.computeBlobKzgProof(blob, commitment);
   if (!cKzg.verifyBlobKzgProof(blob, commitment, proof)) throw new Error('invalid KZG proof');
+  // Post-Osaka (Fusaka) nodes only accept the EIP-7594 sidecar: per-cell proofs, wrapper version 1.
+  const [, cellProofs] = cKzg.computeCellsAndKzgProofs(blob);
   const versionedHash = `0x01${ethers.sha256(commitment).substring(4)}`;
-  return { blob, commitment, proof, versionedHash };
+  return { blob, commitment, proof, cellProofs: ethers.concat(cellProofs), versionedHash };
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -399,7 +401,6 @@ async function submitSponsored(args) {
     console.error(`using externally-posted blob hash: ${versionedHash}`);
   } else {
     console.error('building blob...');
-    const cKzg = await kzgInstance();
     const built = await buildBlob(rawMetadata);
     versionedHash = built.versionedHash;
     console.error('posting blob (type-3) ...');
@@ -415,8 +416,8 @@ async function submitSponsored(args) {
       maxFeePerGas: baseFee * 2n + ethers.parseUnits('2', 'gwei'),
       maxFeePerBlobGas: ethers.parseUnits('30', 'gwei'),
       blobVersionedHashes: [versionedHash],
-      kzg: cKzg,
-      blobs: [built.blob]
+      blobWrapperVersion: 1,
+      blobs: [{ data: built.blob, proof: built.cellProofs, commitment: built.commitment }]
     });
     blobTxHash = blobTx.hash;
     console.error(`  blob tx: ${blobTx.hash}`);
