@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "kaisign-local": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "env": {
+        "ETH_RPC_URL": "${ETH_RPC_URL:-}",
+        "SEPOLIA_RPC_URL": "${SEPOLIA_RPC_URL:-}",
+        "BASE_RPC_URL": "${BASE_RPC_URL:-}"
+      }
+    }
+  }
+}
