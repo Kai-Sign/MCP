@@ -1569,12 +1569,44 @@
         ]
       },
       "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))": {
-        "intent": "Review Exact Input Single transaction",
+        "intent": "Swap via Uniswap V3",
+        "interpolatedIntent": "Swap {params.amountIn} for at least {params.amountOutMinimum}",
         "fields": [
           {
-            "path": "params",
-            "label": "Params",
+            "path": "params.tokenIn",
+            "label": "From Token",
+            "format": "addressName"
+          },
+          {
+            "path": "params.tokenOut",
+            "label": "To Token",
+            "format": "addressName"
+          },
+          {
+            "path": "params.amountIn",
+            "label": "Amount In",
+            "format": "tokenAmount",
+            "params": {
+              "tokenPath": "params.tokenIn"
+            }
+          },
+          {
+            "path": "params.amountOutMinimum",
+            "label": "Min Amount Out",
+            "format": "tokenAmount",
+            "params": {
+              "tokenPath": "params.tokenOut"
+            }
+          },
+          {
+            "path": "params.fee",
+            "label": "Fee Tier",
             "format": "raw"
+          },
+          {
+            "path": "params.recipient",
+            "label": "Recipient",
+            "format": "addressName"
           }
         ]
       },
@@ -1599,12 +1631,44 @@
         ]
       },
       "0x04e45aaf": {
-        "intent": "Review Exact Input Single transaction",
+        "intent": "Swap via Uniswap V3",
+        "interpolatedIntent": "Swap {params.amountIn} for at least {params.amountOutMinimum}",
         "fields": [
           {
-            "path": "params",
-            "label": "Params",
+            "path": "params.tokenIn",
+            "label": "From Token",
+            "format": "addressName"
+          },
+          {
+            "path": "params.tokenOut",
+            "label": "To Token",
+            "format": "addressName"
+          },
+          {
+            "path": "params.amountIn",
+            "label": "Amount In",
+            "format": "tokenAmount",
+            "params": {
+              "tokenPath": "params.tokenIn"
+            }
+          },
+          {
+            "path": "params.amountOutMinimum",
+            "label": "Min Amount Out",
+            "format": "tokenAmount",
+            "params": {
+              "tokenPath": "params.tokenOut"
+            }
+          },
+          {
+            "path": "params.fee",
+            "label": "Fee Tier",
             "format": "raw"
+          },
+          {
+            "path": "params.recipient",
+            "label": "Recipient",
+            "format": "addressName"
           }
         ]
       },
