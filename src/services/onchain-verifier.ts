@@ -1,36 +1,53 @@
 /**
  * On-Chain Metadata Verifier
  *
- * Verifies a contract's ERC-7730 metadata against the KaiSignRegistry SMT on Sepolia.
- * Registry entries are keyed by (chainId, target), where target is the transaction
- * destination address (tx.to) on the target chain.
+ * Verifies a contract's ERC-7730 metadata against the KaiSignRegistry sparse Merkle
+ * tree on Sepolia. Entries are keyed by (chainId, target), where target is the
+ * transaction destination address (tx.to) on the target chain.
  *
  * Verification flow:
- * 1. getLatestSpecForTarget(chainId, target) → latest finalized, non-revoked UID
- * 2. getAttestation(uid) → record; must match (chainId, target), be finalized and not revoked
- * 3. Compute leaf locally: keccak256(abi.encode(LEAF_TYPEHASH, chainId, target, metadataHash))
- * 4. approvedLeaf(chainId, target, metadataHash) on-chain → must equal the local leaf
- *    (proves the deployment uses the same address-keyed leaf scheme)
- * The caller then checks the attested metadataHash against the local metadata file.
+ * 1. Rebuild the SMT locally: seed leaves + SmtRootUpdated events since the seed block
+ * 2. Read smtRoot() from the registry; the local root must equal it
+ * 3. Look up the slot for (chainId, target); empty = no approved metadata
+ * 4. Resolve its metadataHash (seed file, or the finalized registry record)
+ * 5. Check the inclusion proof of keccak256(abi.encode(LEAF_TYPEHASH, chainId, target, metadataHash))
+ *    against the on-chain root
+ * The caller then compares the attested metadataHash with the local metadata file.
  */
 
-import { AbiCoder, Interface, getAddress, keccak256, toUtf8Bytes } from 'ethers';
+import { Interface, getAddress } from 'ethers';
 import {
+  CACHE_TTL,
   KAISIGN_REGISTRY,
-  SEPOLIA_RPC_URLS,
-  LEAF_TYPEHASH_STRING
+  KAISIGN_SMT_SEED_FILE,
+  SEPOLIA_RPC_URLS
 } from '../config/constants.js';
 import { cacheManager } from './cache-manager.js';
+import {
+  SMT_ROOT_UPDATED_TOPIC,
+  RootUpdate,
+  SmtSeed,
+  SparseMerkleTree,
+  ZERO_HASH,
+  buildTree,
+  decodeRootUpdate,
+  loadSeed,
+  smtKey,
+  smtLeaf,
+  verifySmtProof
+} from './registry-smt.js';
 
 export interface AttestationComponents {
-  uid: string;
   chainId: number;
   target: string;
-  blobHash: string;
   metadataHash: string;
-  attester: string;
-  finalizedAt: number;
   revoked: boolean;
+  /** 'bonded' = finalized through commit/reveal/Reality.eth; 'owner-seed' = imported with the migrated root */
+  approval: 'bonded' | 'owner-seed';
+  uid?: string;
+  blobHash?: string;
+  attester?: string;
+  finalizedAt?: number;
 }
 
 export interface VerificationResult {
@@ -44,13 +61,13 @@ export interface VerificationResult {
 }
 
 const REGISTRY_IFACE = new Interface([
+  'function smtRoot() view returns (bytes32)',
   'function getLatestSpecForTarget(uint256 chainId, address target) view returns (bytes32 uid, bool valid)',
-  'function getAttestation(bytes32 uid) view returns ((bytes32 uid, uint256 chainId, address target, bytes32 blobHash, bytes32 metadataHash, address attester, uint64 timestamp, bool revoked, uint64 finalizedAt, uint64 revokeProposedAt, address revokeProposer, uint32 revokeAttempt))',
-  'function approvedLeaf(uint256 chainId, address target, bytes32 metadataHash) pure returns (bytes32)'
+  'function getAttestation(bytes32 uid) view returns ((bytes32 uid, uint256 chainId, address target, bytes32 blobHash, bytes32 metadataHash, address attester, uint64 timestamp, bool revoked, uint64 finalizedAt, uint64 revokeProposedAt, address revokeProposer, uint32 revokeAttempt))'
 ]);
 
-const ZERO_BYTES32 = '0x' + '0'.repeat(64);
 const FETCH_TIMEOUT_MS = Number(process.env.KAISIGN_MCP_FETCH_TIMEOUT_MS || 15000);
+const LOG_BLOCK_RANGE = Number(process.env.KAISIGN_SMT_LOG_BLOCK_RANGE || 10000);
 
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
@@ -62,16 +79,26 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
   }
 }
 
+interface TreeState {
+  tree: SparseMerkleTree;
+  metadataHashByKey: Map<string, string>;
+  updates: RootUpdate[];
+  syncedToBlock: number;
+  syncedAt: number;
+}
+
 export class OnChainVerifier {
   private registryAddress: string;
   private rpcUrls: string[];
+  private seedFile: string;
   private currentRpcIndex: number = 0;
-  private LEAF_TYPEHASH: string;
+  private seed: SmtSeed | null = null;
+  private state: TreeState | null = null;
 
-  constructor(config?: { registryAddress?: string; rpcUrls?: string[] }) {
-    this.registryAddress = config?.registryAddress ?? KAISIGN_REGISTRY;
+  constructor(config?: { registryAddress?: string; rpcUrls?: string[]; seedFile?: string }) {
+    this.registryAddress = getAddress(config?.registryAddress ?? KAISIGN_REGISTRY);
     this.rpcUrls = config?.rpcUrls ?? SEPOLIA_RPC_URLS;
-    this.LEAF_TYPEHASH = keccak256(toUtf8Bytes(LEAF_TYPEHASH_STRING));
+    this.seedFile = config?.seedFile ?? KAISIGN_SMT_SEED_FILE;
   }
 
   private getRpcUrl(): string {
@@ -82,92 +109,104 @@ export class OnChainVerifier {
     this.currentRpcIndex = (this.currentRpcIndex + 1) % this.rpcUrls.length;
   }
 
-  private async rpcCall(method: string, params: unknown[], rpcUrl?: string): Promise<string> {
-    const url = rpcUrl ?? this.getRpcUrl();
-
-    const response = await fetchWithTimeout(url, {
+  private async rpcCall<T = string>(method: string, params: unknown[]): Promise<T> {
+    const response = await fetchWithTimeout(this.getRpcUrl(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: Date.now(),
-        method,
-        params
-      })
+      body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params })
     });
-
-    const data = await response.json() as { result?: string; error?: { message: string } };
-
-    if (data.error) {
-      throw new Error(data.error.message);
-    }
-
-    return data.result ?? '0x';
+    const data = await response.json() as { result?: T; error?: { message: string } };
+    if (data.error) throw new Error(data.error.message);
+    return data.result as T;
   }
 
-  /**
-   * eth_call against the registry on Sepolia, retrying once on another RPC.
-   */
-  private async ethCallSepolia(to: string, data: string): Promise<string> {
+  /** JSON-RPC against the registry chain, retrying once on another RPC. */
+  private async sepoliaRpc<T = string>(method: string, params: unknown[]): Promise<T> {
     const firstUrl = this.getRpcUrl();
     try {
-      return await this.rpcCall('eth_call', [{ to, data }, 'latest']);
+      return await this.rpcCall<T>(method, params);
     } catch (e) {
       this.rotateRpc();
       console.warn(`[OnChainVerifier] RPC ${firstUrl} failed (${(e as Error).message}), retrying via ${this.getRpcUrl()}`);
-      return await this.rpcCall('eth_call', [{ to, data }, 'latest']);
+      return await this.rpcCall<T>(method, params);
     }
   }
 
   private async callRegistry(fn: string, args: unknown[]): Promise<ReturnType<Interface['decodeFunctionResult']>> {
-    const result = await this.ethCallSepolia(this.registryAddress, REGISTRY_IFACE.encodeFunctionData(fn, args));
+    const result = await this.sepoliaRpc('eth_call', [{ to: this.registryAddress, data: REGISTRY_IFACE.encodeFunctionData(fn, args) }, 'latest']);
     if (!result || result === '0x') {
       throw new Error(`registry ${this.registryAddress} returned no data for ${fn}; it may not expose the address-keyed API`);
     }
     return REGISTRY_IFACE.decodeFunctionResult(fn, result);
   }
 
-  /**
-   * SMT leaf: keccak256(abi.encode(LEAF_TYPEHASH, chainId, target, metadataHash))
-   */
-  computeLeafHash(components: Pick<AttestationComponents, 'chainId' | 'target' | 'metadataHash'>): string {
-    return keccak256(AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'uint256', 'address', 'bytes32'],
-      [this.LEAF_TYPEHASH, components.chainId, components.target, components.metadataHash]
-    ));
+  async getOnChainRoot(): Promise<string> {
+    const [root] = await this.callRegistry('smtRoot', []);
+    return String(root).toLowerCase();
   }
 
-  /**
-   * SMT key: keccak256(abi.encode(chainId, target))
-   */
-  computeSmtKey(chainId: number, target: string): string {
-    return keccak256(AbiCoder.defaultAbiCoder().encode(['uint256', 'address'], [chainId, target]));
+  private async fetchRootUpdates(fromBlock: number, toBlock: number): Promise<RootUpdate[]> {
+    const updates: RootUpdate[] = [];
+    for (let start = fromBlock; start <= toBlock; start += LOG_BLOCK_RANGE) {
+      const end = Math.min(start + LOG_BLOCK_RANGE - 1, toBlock);
+      const logs = await this.sepoliaRpc<Array<{ topics: string[]; data: string; blockNumber: string; logIndex: string }>>('eth_getLogs', [{
+        address: this.registryAddress,
+        topics: [SMT_ROOT_UPDATED_TOPIC],
+        fromBlock: '0x' + start.toString(16),
+        toBlock: '0x' + end.toString(16)
+      }]);
+      logs.sort((a, b) => Number(BigInt(a.blockNumber) - BigInt(b.blockNumber)) || Number(BigInt(a.logIndex) - BigInt(b.logIndex)));
+      updates.push(...logs.map(decodeRootUpdate));
+    }
+    return updates;
   }
 
-  async getLatestSpec(chainId: number, target: string): Promise<{ uid: string | null; valid: boolean }> {
+  /** Rebuild or extend the local tree up to the latest block. */
+  async syncTree(): Promise<TreeState> {
+    if (this.state && Date.now() - this.state.syncedAt < CACHE_TTL) return this.state;
+
+    if (!this.seed) {
+      this.seed = loadSeed(this.seedFile);
+      if (getAddress(this.seed.registry) !== this.registryAddress) {
+        throw new Error(`SMT seed ${this.seedFile} is for registry ${this.seed.registry}, verifier uses ${this.registryAddress}`);
+      }
+    }
+
+    const latest = Number(BigInt(await this.sepoliaRpc('eth_blockNumber', [])));
+    const fromBlock = this.state ? this.state.syncedToBlock + 1 : this.seed.fromBlock;
+    const newUpdates = fromBlock <= latest ? await this.fetchRootUpdates(fromBlock, latest) : [];
+    const updates = [...(this.state?.updates ?? []), ...newUpdates];
+
+    const { tree, metadataHashByKey } = this.state && newUpdates.length === 0
+      ? this.state
+      : buildTree(this.seed, updates);
+
+    this.state = { tree, metadataHashByKey, updates, syncedToBlock: latest, syncedAt: Date.now() };
+    return this.state;
+  }
+
+  /** Resolve the metadataHash behind a non-empty slot, and how it was approved. */
+  private async resolveEntry(state: TreeState, key: string, chainId: number, target: string, leaf: string): Promise<AttestationComponents | null> {
+    const seeded = state.metadataHashByKey.get(key.toLowerCase());
+    if (seeded && smtLeaf(chainId, target, seeded) === leaf) {
+      return { chainId, target, metadataHash: seeded, revoked: false, approval: 'owner-seed' };
+    }
+
     const [uid, valid] = await this.callRegistry('getLatestSpecForTarget', [chainId, target]);
-    const isZero = uid === ZERO_BYTES32;
-    return { uid: isZero ? null : uid, valid: Boolean(valid) && !isZero };
-  }
-
-  async getAttestationComponents(uid: string): Promise<AttestationComponents | null> {
+    if (!valid || uid === ZERO_HASH) return null;
     const [att] = await this.callRegistry('getAttestation', [uid]);
-    if (!att || att.uid === ZERO_BYTES32) return null;
+    if (smtLeaf(chainId, target, att.metadataHash) !== leaf) return null;
     return {
-      uid: att.uid,
-      chainId: Number(att.chainId),
-      target: getAddress(att.target),
+      chainId,
+      target,
+      metadataHash: String(att.metadataHash).toLowerCase(),
+      revoked: Boolean(att.revoked),
+      approval: 'bonded',
+      uid,
       blobHash: att.blobHash,
-      metadataHash: att.metadataHash,
       attester: getAddress(att.attester),
-      finalizedAt: Number(att.finalizedAt),
-      revoked: Boolean(att.revoked)
+      finalizedAt: Number(att.finalizedAt)
     };
-  }
-
-  async getOnChainLeaf(components: Pick<AttestationComponents, 'chainId' | 'target' | 'metadataHash'>): Promise<string> {
-    const [leaf] = await this.callRegistry('approvedLeaf', [components.chainId, components.target, components.metadataHash]);
-    return leaf;
   }
 
   /**
@@ -189,43 +228,43 @@ export class OnChainVerifier {
 
     try {
       const target = getAddress(contractAddress);
+      const state = await this.syncTree();
+      const onChainRoot = await this.getOnChainRoot();
+      result.onChainHash = onChainRoot;
 
-      const spec = await this.getLatestSpec(chainId, target);
-      if (!spec.valid || !spec.uid) {
-        result.details = 'No attestation found on-chain for this contract';
+      if (state.tree.root() !== onChainRoot) {
+        result.source = 'error';
+        result.details = `Local SMT root ${state.tree.root()} does not match on-chain smtRoot ${onChainRoot}`;
         cacheManager.setVerification(contractAddress, chainId, result);
         return result;
       }
-      result.uid = spec.uid;
 
-      const components = await this.getAttestationComponents(spec.uid);
-      if (!components) {
-        result.details = `Registry returned no record for uid ${spec.uid}`;
+      const key = smtKey(chainId, target);
+      const leaf = state.tree.get(key);
+      if (leaf === ZERO_HASH) {
+        result.details = 'No approved metadata for this contract in the registry SMT';
         cacheManager.setVerification(contractAddress, chainId, result);
         return result;
       }
-      result.attestationComponents = components;
+      result.hash = leaf;
 
-      if (components.chainId !== chainId || components.target !== target) {
+      const entry = await this.resolveEntry(state, key, chainId, target, leaf);
+      if (!entry) {
         result.source = 'mismatch';
-        result.details = `Record ${spec.uid} is for ${components.target} on chain ${components.chainId}, not ${target} on chain ${chainId}`;
-      } else if (components.revoked || components.finalizedAt === 0) {
-        result.source = 'mismatch';
-        result.details = components.revoked ? `Record ${spec.uid} is revoked` : `Record ${spec.uid} is not finalized`;
+        result.details = `SMT slot for ${target} on chain ${chainId} holds leaf ${leaf}, but no known metadataHash produces it`;
+        cacheManager.setVerification(contractAddress, chainId, result);
+        return result;
+      }
+      result.attestationComponents = entry;
+      result.uid = entry.uid;
+
+      if (verifySmtProof(key, smtLeaf(chainId, target, entry.metadataHash), state.tree.proof(key), onChainRoot)) {
+        result.verified = true;
+        result.source = 'leaf-verified';
+        result.details = `SMT inclusion proof verified against on-chain root (${entry.approval === 'bonded' ? 'bonded finalization' : 'owner-imported seed'})`;
       } else {
-        const localLeaf = this.computeLeafHash(components);
-        const onChainLeaf = await this.getOnChainLeaf(components);
-        result.hash = localLeaf;
-        result.onChainHash = onChainLeaf;
-
-        if (localLeaf.toLowerCase() === onChainLeaf.toLowerCase()) {
-          result.verified = true;
-          result.source = 'leaf-verified';
-          result.details = 'Finalized registry record verified; leaf matches the registry SMT leaf scheme';
-        } else {
-          result.source = 'mismatch';
-          result.details = `Leaf mismatch: local=${localLeaf} on-chain=${onChainLeaf}`;
-        }
+        result.source = 'mismatch';
+        result.details = `SMT inclusion proof failed against on-chain root ${onChainRoot}`;
       }
     } catch (e) {
       result.source = 'error';

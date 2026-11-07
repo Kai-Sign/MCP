@@ -3,6 +3,7 @@
  * Verifies contract metadata against on-chain registry
  */
 
+import type { AttestationComponents } from '../services/onchain-verifier.js';
 import { z } from 'zod';
 import { onChainVerifier, VerificationResult } from '../services/onchain-verifier.js';
 import { metadataService } from '../services/metadata-service.js';
@@ -23,16 +24,7 @@ export interface VerifyMetadataResult {
   uid?: string;
   leafHash?: string;
   onChainLeafHash?: string;
-  attestation?: {
-    uid: string;
-    chainId: number;
-    target: string;
-    blobHash: string;
-    metadataHash: string;
-    attester: string;
-    finalizedAt: number;
-    revoked: boolean;
-  };
+  attestation?: AttestationComponents;
   contractName?: string;
   hasMetadata: boolean;
 }

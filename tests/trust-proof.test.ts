@@ -13,6 +13,7 @@ import { getEncoding } from 'js-tiktoken';
 import { keccak256, toUtf8Bytes, AbiCoder, Interface } from 'ethers';
 
 import { onChainVerifier, OnChainVerifier } from '../src/services/onchain-verifier.js';
+import { smtLeaf } from '../src/services/registry-smt.js';
 import { transactionDecoder } from '../src/services/abi-decoder.js';
 import { metadataService } from '../src/services/metadata-service.js';
 import { cacheManager } from '../src/services/cache-manager.js';
@@ -158,44 +159,15 @@ const MANUAL_VERIFICATION_CONTEXT = {
 // =============================================================================
 
 describe('Proof 1: On-Chain Attestation Validity', () => {
-  it('proves local leaf hash matches on-chain registry', async () => {
+  it('proves the contract leaf is in the on-chain SMT root', async () => {
     const { address, chainId } = TEST_CONTRACTS.UNISWAP_ROUTER_MAINNET;
-
-    // Step 1: Query registry for the latest finalized record of (chainId, target)
-    let spec;
-    try {
-      spec = await onChainVerifier.getLatestSpec(chainId, address);
-    } catch (e) {
-      console.log('  Skipping: registry does not expose getLatestSpecForTarget:', (e as Error).message);
-      return;
+    const result = await onChainVerifier.verifyMetadata(address, chainId);
+    console.log('SMT verification:', result.source, result.details);
+    if (result.source === 'error') return; // registry RPC unavailable
+    expect(['leaf-verified', 'local-metadata']).toContain(result.source);
+    if (result.source === 'leaf-verified') {
+      expect(result.attestationComponents?.target.toLowerCase()).toBe(address.toLowerCase());
     }
-
-    if (!spec.valid || !spec.uid) {
-      console.log('  Skipping: No attestation found in registry for this contract');
-      return;
-    }
-
-    console.log('Step 1: Got attestation UID:', spec.uid.slice(0, 18) + '...');
-
-    // Step 2: Read the record
-    const components = await onChainVerifier.getAttestationComponents(spec.uid);
-    if (!components) {
-      console.log('  Skipping: Registry returned no record');
-      return;
-    }
-
-    console.log('Step 2: Record: chainId', components.chainId, 'target', components.target,
-      'metadataHash', components.metadataHash.slice(0, 18) + '...', 'revoked', components.revoked);
-    expect(components.chainId).toBe(chainId);
-    expect(components.target.toLowerCase()).toBe(address.toLowerCase());
-
-    // Step 3: Local leaf must equal the registry's approvedLeaf for the same inputs
-    const localLeaf = onChainVerifier.computeLeafHash(components);
-    const onChainLeaf = await onChainVerifier.getOnChainLeaf(components);
-
-    console.log('Local leaf:    ', localLeaf);
-    console.log('On-chain leaf: ', onChainLeaf);
-    expect(localLeaf.toLowerCase()).toBe(onChainLeaf.toLowerCase());
   });
 
   it('verifies LEAF_TYPEHASH matches the v1-core SparseMerkleTree constant', () => {
@@ -205,16 +177,8 @@ describe('Proof 1: On-Chain Attestation Validity', () => {
   });
 
   it('proves changed metadata produces a different leaf (tamper-evident)', () => {
-    const components = {
-      chainId: 1,
-      target: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
-      metadataHash: '0x' + '2'.repeat(64)
-    };
-
-    const leaf = onChainVerifier.computeLeafHash(components);
-    const tampered = onChainVerifier.computeLeafHash({ ...components, metadataHash: '0x' + '3'.repeat(64) });
-
-    expect(leaf).not.toBe(tampered);
+    const target = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+    expect(smtLeaf(1, target, '0x' + '2'.repeat(64))).not.toBe(smtLeaf(1, target, '0x' + '3'.repeat(64)));
   });
 });
 
