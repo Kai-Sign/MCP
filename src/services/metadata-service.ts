@@ -13,7 +13,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cacheManager } from './cache-manager.js';
-import { VerificationResult } from './onchain-verifier.js';
+import { onChainVerifier, VerificationResult } from './onchain-verifier.js';
+import { assertMetadataHashMatches } from './metadata-hash.js';
 import { id as keccakId } from 'ethers';
 
 const FETCH_TIMEOUT_MS = Number(process.env.KAISIGN_MCP_FETCH_TIMEOUT_MS || 15000);
@@ -472,13 +473,7 @@ export class MetadataService {
         return null;
       }
 
-      metadata._verification = {
-        verified: false,
-        source: 'local-metadata',
-        details: `loaded from local metadata directory: ${this.getLocalIndex().rootDirs.join(', ')}`,
-        hash: null,
-        onChainHash: null
-      };
+      metadata._verification = await this.verifyAgainstRegistry(metadata, normalizedAddress, chainId);
 
       // Cache result
       cacheManager.setMetadata(normalizedAddress, chainId, metadata, selector);
@@ -489,6 +484,25 @@ export class MetadataService {
       console.error('[MetadataService] Failed to fetch metadata:', (e as Error).message);
       return null;
     }
+  }
+
+  /**
+   * Check the transaction target against the registry SMT and bind the loaded JSON to the
+   * attested metadataHash. Verified only when both the inclusion proof and the hash match.
+   */
+  private async verifyAgainstRegistry(metadata: ContractMetadata, address: string, chainId: number): Promise<VerificationResult> {
+    const result = await onChainVerifier.verifyMetadata(address, chainId);
+    if (!result.verified || result.source !== 'leaf-verified') {
+      return {
+        ...result,
+        details: `${result.details ?? 'not registry-verified'}; metadata loaded from local directory: ${this.getLocalIndex().rootDirs.join(', ')}`
+      };
+    }
+    const check = assertMetadataHashMatches(metadata, result.attestationComponents?.metadataHash ?? '');
+    if (!check.verified) {
+      return { ...result, verified: false, source: 'mismatch', details: `local metadata is not the registry-approved file: ${check.error}` };
+    }
+    return result;
   }
 
   /**
