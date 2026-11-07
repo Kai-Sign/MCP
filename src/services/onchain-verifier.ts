@@ -69,6 +69,7 @@ const REGISTRY_IFACE = new Interface([
 
 const FETCH_TIMEOUT_MS = Number(process.env.KAISIGN_MCP_FETCH_TIMEOUT_MS || 15000);
 const LOG_BLOCK_RANGE = Number(process.env.KAISIGN_SMT_LOG_BLOCK_RANGE || 10000);
+const SMT_CONFIRMATIONS = Number(process.env.KAISIGN_SMT_CONFIRMATIONS || 2);
 
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
@@ -142,16 +143,17 @@ export class OnChainVerifier {
     }
   }
 
-  private async callRegistry(fn: string, args: unknown[]): Promise<ReturnType<Interface['decodeFunctionResult']>> {
-    const result = await this.sepoliaRpc('eth_call', [{ to: this.registryAddress, data: REGISTRY_IFACE.encodeFunctionData(fn, args) }, 'latest']);
+  private async callRegistry(fn: string, args: unknown[], blockTag: string = 'latest'): Promise<ReturnType<Interface['decodeFunctionResult']>> {
+    const result = await this.sepoliaRpc('eth_call', [{ to: this.registryAddress, data: REGISTRY_IFACE.encodeFunctionData(fn, args) }, blockTag]);
     if (!result || result === '0x') {
       throw new Error(`registry ${this.registryAddress} returned no data for ${fn}; it may not expose the address-keyed API`);
     }
     return REGISTRY_IFACE.decodeFunctionResult(fn, result);
   }
 
-  async getOnChainRoot(): Promise<string> {
-    const [root] = await this.callRegistry('smtRoot', []);
+  /** smtRoot() at a specific block, so it can be compared with a tree synced to that block. */
+  async getOnChainRoot(blockNumber: number): Promise<string> {
+    const [root] = await this.callRegistry('smtRoot', [], '0x' + blockNumber.toString(16));
     return String(root).toLowerCase();
   }
 
@@ -182,7 +184,8 @@ export class OnChainVerifier {
       }
     }
 
-    const latest = Number(BigInt(await this.sepoliaRpc('eth_blockNumber', [])));
+    // Stay a few blocks behind head so every RPC in the rotation can serve the range.
+    const latest = Number(BigInt(await this.sepoliaRpc('eth_blockNumber', []))) - SMT_CONFIRMATIONS;
     const fromBlock = this.state ? this.state.syncedToBlock + 1 : this.seed.fromBlock;
     const newUpdates = fromBlock <= latest ? await this.fetchRootUpdates(fromBlock, latest) : [];
     const updates = [...(this.state?.updates ?? []), ...newUpdates];
@@ -239,7 +242,7 @@ export class OnChainVerifier {
     try {
       const target = getAddress(contractAddress);
       const state = await this.syncTree();
-      const onChainRoot = await this.getOnChainRoot();
+      const onChainRoot = await this.getOnChainRoot(state.syncedToBlock);
       result.onChainHash = onChainRoot;
 
       if (state.tree.root() !== onChainRoot) {
