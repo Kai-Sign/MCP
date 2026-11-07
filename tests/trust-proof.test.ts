@@ -161,90 +161,60 @@ describe('Proof 1: On-Chain Attestation Validity', () => {
   it('proves local leaf hash matches on-chain registry', async () => {
     const { address, chainId } = TEST_CONTRACTS.UNISWAP_ROUTER_MAINNET;
 
-    // Step 1: Get contract bytecode hash
-    const extcodehash = await onChainVerifier.getExtcodehash(address, chainId);
-
-    if (!extcodehash) {
-      console.log('  Skipping: Could not get extcodehash (contract may not exist)');
+    // Step 1: Query registry for the latest finalized record of (chainId, target)
+    let spec;
+    try {
+      spec = await onChainVerifier.getLatestSpec(chainId, address);
+    } catch (e) {
+      console.log('  Skipping: registry does not expose getLatestSpecForTarget:', (e as Error).message);
       return;
     }
-
-    console.log('Step 1: Got extcodehash:', extcodehash.slice(0, 18) + '...');
-
-    // Step 2: Query registry for attestation UID
-    const spec = await onChainVerifier.getLatestSpec(chainId, extcodehash);
 
     if (!spec.valid || !spec.uid) {
       console.log('  Skipping: No attestation found in registry for this contract');
       return;
     }
 
-    console.log('Step 2: Got attestation UID:', spec.uid.slice(0, 18) + '...');
+    console.log('Step 1: Got attestation UID:', spec.uid.slice(0, 18) + '...');
 
-    // Step 3: Get attestation components from registry
+    // Step 2: Read the record
     const components = await onChainVerifier.getAttestationComponents(spec.uid);
-
     if (!components) {
-      console.log('  Skipping: Could not parse attestation components');
+      console.log('  Skipping: Registry returned no record');
       return;
     }
 
-    console.log('Step 3: Attestation components:');
-    console.log('  - chainId:', components.chainId);
-    console.log('  - extcodehash:', components.extcodehash.slice(0, 18) + '...');
-    console.log('  - metadataHash:', components.metadataHash.slice(0, 18) + '...');
-    console.log('  - idx:', components.idx);
-    console.log('  - revoked:', components.revoked);
+    console.log('Step 2: Record: chainId', components.chainId, 'target', components.target,
+      'metadataHash', components.metadataHash.slice(0, 18) + '...', 'revoked', components.revoked);
+    expect(components.chainId).toBe(chainId);
+    expect(components.target.toLowerCase()).toBe(address.toLowerCase());
 
-    // Step 4: Compute leaf hash locally using LEAF_TYPEHASH
+    // Step 3: Local leaf must equal the registry's approvedLeaf for the same inputs
     const localLeaf = onChainVerifier.computeLeafHash(components);
-    console.log('Step 4: Local leaf hash:', localLeaf.slice(0, 18) + '...');
+    const onChainLeaf = await onChainVerifier.getOnChainLeaf(components);
 
-    // Step 5: Get on-chain leaf hash from registry
-    const onChainLeaf = await onChainVerifier.getOnChainLeaf(spec.uid);
-
-    if (!onChainLeaf) {
-      console.log('  Skipping: Could not get on-chain leaf');
-      return;
-    }
-
-    console.log('Step 5: On-chain leaf hash:', onChainLeaf.slice(0, 18) + '...');
-
-    // Step 6: PROOF - They must match
-    console.log('\n=== PROOF ===');
     console.log('Local leaf:    ', localLeaf);
     console.log('On-chain leaf: ', onChainLeaf);
-
     expect(localLeaf.toLowerCase()).toBe(onChainLeaf.toLowerCase());
-    console.log('VERIFIED: Leaf hashes match - metadata attestation is cryptographically valid');
   });
 
-  it('verifies LEAF_TYPEHASH is correctly computed', () => {
-    // The LEAF_TYPEHASH must match what the contract uses
-    const expectedTypehash = keccak256(toUtf8Bytes(LEAF_TYPEHASH_STRING));
-    const verifierTypehash = keccak256(toUtf8Bytes(LEAF_TYPEHASH_STRING));
-
-    expect(verifierTypehash).toBe(expectedTypehash);
-    console.log('LEAF_TYPEHASH:', expectedTypehash);
-    console.log('Matches string:', LEAF_TYPEHASH_STRING);
+  it('verifies LEAF_TYPEHASH matches the v1-core SparseMerkleTree constant', () => {
+    expect(LEAF_TYPEHASH_STRING).toBe('RegistryLeaf(uint256 chainId,address target,bytes32 metadataHash)');
+    expect(keccak256(toUtf8Bytes(LEAF_TYPEHASH_STRING)))
+      .toBe('0x2638dc06a59cd50d733b8628e9f1a6bf8136bcb5b84c3368b2ed9c2581865359');
   });
 
-  it('proves revoked attestations have different leaf hash', () => {
+  it('proves changed metadata produces a different leaf (tamper-evident)', () => {
     const components = {
       chainId: 1,
-      extcodehash: '0x' + '1'.repeat(64),
-      metadataHash: '0x' + '2'.repeat(64),
-      idx: 0,
-      revoked: false
+      target: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      metadataHash: '0x' + '2'.repeat(64)
     };
 
-    const activeLeaf = onChainVerifier.computeLeafHash(components);
-    const revokedLeaf = onChainVerifier.computeLeafHash({ ...components, revoked: true });
+    const leaf = onChainVerifier.computeLeafHash(components);
+    const tampered = onChainVerifier.computeLeafHash({ ...components, metadataHash: '0x' + '3'.repeat(64) });
 
-    expect(activeLeaf).not.toBe(revokedLeaf);
-    console.log('Active leaf:  ', activeLeaf.slice(0, 34) + '...');
-    console.log('Revoked leaf: ', revokedLeaf.slice(0, 34) + '...');
-    console.log('VERIFIED: Revocation changes leaf hash (tamper-evident)');
+    expect(leaf).not.toBe(tampered);
   });
 });
 
@@ -633,8 +603,8 @@ describe('Trust System Summary', () => {
     console.log('║                                                                ║');
     console.log('║  PROOF 1: On-Chain Attestation Validity                        ║');
     console.log('║  ─────────────────────────────────────────                     ║');
-    console.log('║  Local leaf hash = keccak256(TYPEHASH + components)            ║');
-    console.log('║  On-chain leaf = registry.computeAttestationLeaf(uid)          ║');
+    console.log('║  Local leaf = keccak256(TYPEHASH, chainId, target, metaHash)   ║');
+    console.log('║  On-chain leaf = registry.approvedLeaf(chainId, target, hash)  ║');
     console.log('║  MATCH → Metadata hasn\'t been tampered with                    ║');
     console.log('║                                                                ║');
     console.log('║  PROOF 2: Intent Matches Calldata                              ║');

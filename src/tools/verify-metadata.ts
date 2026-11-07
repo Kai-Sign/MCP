@@ -24,10 +24,13 @@ export interface VerifyMetadataResult {
   leafHash?: string;
   onChainLeafHash?: string;
   attestation?: {
+    uid: string;
     chainId: number;
-    extcodehash: string;
+    target: string;
+    blobHash: string;
     metadataHash: string;
-    idx: number;
+    attester: string;
+    finalizedAt: number;
     revoked: boolean;
   };
   contractName?: string;

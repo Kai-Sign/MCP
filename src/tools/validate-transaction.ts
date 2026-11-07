@@ -68,7 +68,7 @@ export interface ValidateTransactionResult {
   verification?: {
     attestationUid?: string;
     metadataHash?: string;
-    idx?: number;
+    target?: string;
     revoked?: boolean;
   };
 
@@ -131,7 +131,7 @@ export async function validateTransaction(
       result.verification = {
         attestationUid: verificationResult.uid,
         metadataHash: verificationResult.attestationComponents?.metadataHash,
-        idx: verificationResult.attestationComponents?.idx,
+        target: verificationResult.attestationComponents?.target,
         revoked: verificationResult.attestationComponents?.revoked
       };
 

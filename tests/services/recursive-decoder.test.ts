@@ -22,7 +22,7 @@ const verified = {
   hash: '0xhash',
   onChainHash: '0xhash',
   uid: '0xuid',
-  attestationComponents: { chainId, extcodehash: '0xcode', metadataHash: '0xmeta', idx: 1, revoked: false }
+  attestationComponents: { uid: '0xuid', chainId, target: '0x0000000000000000000000000000000000000001', blobHash: '0xblob', metadataHash: '0xmeta', attester: '0x0000000000000000000000000000000000000002', finalizedAt: 1, revoked: false }
 };
 
 const erc20Iface = new Interface(['function transfer(address to,uint256 amount)']);

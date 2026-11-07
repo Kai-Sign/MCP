@@ -23,63 +23,35 @@ const TEST_CONTRACTS = {
 };
 
 describe('OnChainVerifier', () => {
-  describe('getExtcodehash', () => {
-    it('returns bytecode hash for a contract', async () => {
-      const hash = await onChainVerifier.getExtcodehash(
-        TEST_CONTRACTS.USDC_MAINNET.address,
-        TEST_CONTRACTS.USDC_MAINNET.chainId
-      );
-
-      // RPC may be rate limited - skip assertion if null
-      if (hash === null) {
-        console.log('Skipping assertion - RPC returned null (likely rate limited)');
-        return;
-      }
-      expect(hash).toBeTruthy();
-      expect(hash).toMatch(/^0x[a-fA-F0-9]{64}$/);
-    });
-
-    it('returns null for EOA addresses', async () => {
-      // Random EOA address
-      const hash = await onChainVerifier.getExtcodehash(
-        '0x0000000000000000000000000000000000000001',
-        1
-      );
-
-      expect(hash).toBeNull();
+  describe('computeSmtKey', () => {
+    it('matches keccak256(abi.encode(chainId, target))', () => {
+      expect(onChainVerifier.computeSmtKey(1, TEST_CONTRACTS.USDC_MAINNET.address))
+        .toBe('0xb340dcebc6634c8db42e41014206798ccc4b36e5bf3a1ed61b89a5f70afa8cd4');
     });
   });
 
   describe('computeLeafHash', () => {
-    it('computes deterministic leaf hash', () => {
-      const components = {
-        chainId: 1,
-        extcodehash: '0x' + '1'.repeat(64),
-        metadataHash: '0x' + '2'.repeat(64),
-        idx: 0,
-        revoked: false
-      };
+    // Golden vectors computed with `cast abi-encode` + `cast keccak` against
+    // LEAF_TYPEHASH = keccak256("RegistryLeaf(uint256 chainId,address target,bytes32 metadataHash)")
+    const components = {
+      chainId: 1,
+      target: TEST_CONTRACTS.USDC_MAINNET.address,
+      metadataHash: '0x' + '2'.repeat(64)
+    };
 
-      const hash1 = onChainVerifier.computeLeafHash(components);
-      const hash2 = onChainVerifier.computeLeafHash(components);
-
-      expect(hash1).toBe(hash2);
-      expect(hash1).toMatch(/^0x[a-fA-F0-9]{64}$/);
+    it('matches the Solidity address-keyed leaf encoding', () => {
+      expect(onChainVerifier.computeLeafHash(components))
+        .toBe('0x9cbe189f572ea7793b5f21cf36de9e0e7ca1537d04fea83c8e843f7e44588432');
     });
 
-    it('produces different hash for revoked attestation', () => {
-      const components = {
-        chainId: 1,
-        extcodehash: '0x' + '1'.repeat(64),
-        metadataHash: '0x' + '2'.repeat(64),
-        idx: 0,
-        revoked: false
-      };
+    it('binds the target chain', () => {
+      expect(onChainVerifier.computeLeafHash({ ...components, chainId: 8453 }))
+        .toBe('0xd77b0d7850e3c1112517432feaaac69ba70cc6a33c60f9dc529f28ba2756c101');
+    });
 
-      const hashNotRevoked = onChainVerifier.computeLeafHash(components);
-      const hashRevoked = onChainVerifier.computeLeafHash({ ...components, revoked: true });
-
-      expect(hashNotRevoked).not.toBe(hashRevoked);
+    it('is case-insensitive in the target address', () => {
+      expect(onChainVerifier.computeLeafHash({ ...components, target: components.target.toLowerCase() }))
+        .toBe(onChainVerifier.computeLeafHash(components));
     });
   });
 

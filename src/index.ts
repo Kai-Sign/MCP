@@ -63,19 +63,19 @@ export const mcpTools = [
     name: 'verify_contract_metadata',
     description: `Diagnostic: verify one contract's metadata attestation against the on-chain KaiSign Registry. For decoding + safety verdicts on a transaction, prefer clear_sign_payload (it verifies every contract in the call tree automatically).
 
-This tool checks if a contract's ERC-7730 metadata has been attested on-chain by computing
-leaf hashes and comparing them against the KaiSign Registry on Sepolia.
+This tool checks whether a contract has finalized ERC-7730 metadata in the KaiSign Registry SMT on Sepolia.
+Entries are keyed by (chainId, target), where target is the transaction destination address.
 
 Verification flow:
-1. Get contract bytecode hash (extcodehash)
-2. Query registry for attestation UID
-3. Parse attestation struct and compute leaf hash locally
-4. Compare against on-chain computed leaf hash
+1. getLatestSpecForTarget(chainId, target) for the latest finalized, non-revoked UID
+2. getAttestation(uid) and check chainId, target, finalized and not revoked
+3. Compute the SMT leaf locally: keccak256(abi.encode(LEAF_TYPEHASH, chainId, target, metadataHash))
+4. Compare against the registry approvedLeaf(chainId, target, metadataHash)
 
 Returns:
 - verified: true if leaf hashes match
 - source: 'leaf-verified' (success), 'local-metadata' (local file, no on-chain attestation), 'mismatch', or 'error'
-- attestation details including metadataHash, idx, revoked status`,
+- attestation details including target, metadataHash, finalizedAt, revoked status`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -201,7 +201,7 @@ Returns:
 - intent: Human-readable description of what the transaction does
 - params: Decoded function parameters with labels
 - warnings: Any concerns about the transaction
-- verification: Attestation details (uid, metadataHash, idx, revoked status)`,
+- verification: Attestation details (uid, target, metadataHash, revoked status)`,
     inputSchema: {
       type: 'object',
       properties: {

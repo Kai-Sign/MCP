@@ -54,7 +54,7 @@ export interface DecodeTransactionResult {
     uid?: string;
     metadataHash?: string;
     revoked?: boolean;
-    idx?: number;
+    target?: string;
   };
   contracts: ContractSummary[];
   signing: SigningStatus;
@@ -124,7 +124,7 @@ export async function decodeTransaction(
         uid: verificationResult.uid,
         metadataHash: verificationResult.attestationComponents?.metadataHash,
         revoked: verificationResult.attestationComponents?.revoked,
-        idx: verificationResult.attestationComponents?.idx
+        target: verificationResult.attestationComponents?.target
       };
     } catch (e) {
       verification = {

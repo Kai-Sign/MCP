@@ -2,8 +2,8 @@
  * KaiSign MCP Constants
  */
 
-// KaiSign Registry contract on Sepolia
-export const KAISIGN_REGISTRY = process.env.KAISIGN_REGISTRY_ADDRESS || '0x655084b6A0f2Ee600bd31A71820b5E068b7870d0';
+// KaiSign Registry (UUPS proxy, depth-256 SMT keyed by chainId + target address) on Sepolia
+export const KAISIGN_REGISTRY = process.env.KAISIGN_REGISTRY_ADDRESS || '0xf70D41afe5Ff76Ac3Bee86BCBda07450f3b590F0';
 
 // Chain IDs
 export const SEPOLIA_CHAIN_ID = 11155111;
@@ -58,4 +58,4 @@ export const EIP1967_IMPL_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc37
 export const SAFE_MASTER_COPY_SLOT = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
 // Leaf typehash for verification
-export const LEAF_TYPEHASH_STRING = 'RegistryLeaf(uint256 chainId,bytes32 extcodehash,bytes32 metadataHash,uint256 idx,bool revoked)';
+export const LEAF_TYPEHASH_STRING = 'RegistryLeaf(uint256 chainId,address target,bytes32 metadataHash)';
