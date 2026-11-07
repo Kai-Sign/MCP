@@ -106,6 +106,15 @@ export class OnChainVerifier {
     return this.rpcUrls[this.currentRpcIndex % this.rpcUrls.length];
   }
 
+  /** Host only: RPC URLs from env often carry an API key in the path or query. */
+  private rpcLabel(url: string): string {
+    try {
+      return new URL(url).host;
+    } catch {
+      return `RPC #${this.rpcUrls.indexOf(url)}`;
+    }
+  }
+
   private rotateRpc(): void {
     this.currentRpcIndex = (this.currentRpcIndex + 1) % this.rpcUrls.length;
   }
@@ -128,7 +137,7 @@ export class OnChainVerifier {
       return await this.rpcCall<T>(method, params);
     } catch (e) {
       this.rotateRpc();
-      console.warn(`[OnChainVerifier] RPC ${firstUrl} failed (${(e as Error).message}), retrying via ${this.getRpcUrl()}`);
+      console.warn(`[OnChainVerifier] RPC ${this.rpcLabel(firstUrl)} failed (${(e as Error).message}), retrying via ${this.rpcLabel(this.getRpcUrl())}`);
       return await this.rpcCall<T>(method, params);
     }
   }
