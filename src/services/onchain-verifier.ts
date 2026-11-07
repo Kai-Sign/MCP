@@ -20,7 +20,8 @@ import {
   CACHE_TTL,
   KAISIGN_REGISTRY,
   KAISIGN_SMT_SEED_FILE,
-  SEPOLIA_RPC_URLS
+  RPC_URLS,
+  SEPOLIA_CHAIN_ID
 } from '../config/constants.js';
 import { cacheManager } from './cache-manager.js';
 import {
@@ -97,7 +98,7 @@ export class OnChainVerifier {
 
   constructor(config?: { registryAddress?: string; rpcUrls?: string[]; seedFile?: string }) {
     this.registryAddress = getAddress(config?.registryAddress ?? KAISIGN_REGISTRY);
-    this.rpcUrls = config?.rpcUrls ?? SEPOLIA_RPC_URLS;
+    this.rpcUrls = config?.rpcUrls ?? RPC_URLS[SEPOLIA_CHAIN_ID];
     this.seedFile = config?.seedFile ?? KAISIGN_SMT_SEED_FILE;
   }
 
