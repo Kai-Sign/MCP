@@ -6,7 +6,8 @@
       "env": {
         "ETH_RPC_URL": "${ETH_RPC_URL:-}",
         "SEPOLIA_RPC_URL": "${SEPOLIA_RPC_URL:-}",
-        "BASE_RPC_URL": "${BASE_RPC_URL:-}"
+        "BASE_RPC_URL": "${BASE_RPC_URL:-}",
+        "LIGHT_CLIENT_RPC_URL": "${LIGHT_CLIENT_RPC_URL:-}"
       }
     }
   }

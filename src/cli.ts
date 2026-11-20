@@ -220,7 +220,7 @@ async function readStdinText(): Promise<string> {
   return input;
 }
 
-function formatPlain(result: Record<string, unknown>): string {
+export function formatPlain(result: Record<string, unknown>): string {
   const signing = result.signing as SigningStatus | undefined;
   const contracts = (result.contracts as ContractSummary[] | undefined) ?? [];
   const callTree = result.callTree as RecursiveCallNode | undefined;

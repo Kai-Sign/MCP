@@ -99,7 +99,9 @@ function getChainName(chainId: number): string {
     137: 'Polygon',
     43114: 'Avalanche',
     56: 'BNB Chain',
-    11155111: 'Sepolia'
+    11155111: 'Sepolia',
+    100: 'Gnosis',
+    560048: 'Hoodi'
   };
   return chains[chainId] || `Chain ${chainId}`;
 }

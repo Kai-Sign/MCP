@@ -87,6 +87,23 @@ These contracts have on-chain attested metadata in the KaiSign Registry and can 
 | Base | 8453 | `https://base-rpc.publicnode.com` |
 | Arbitrum | 42161 | `https://arbitrum-one-rpc.publicnode.com` |
 | Sepolia (testnet) | 11155111 | `https://ethereum-sepolia-rpc.publicnode.com` |
+| Gnosis | 100 | `https://rpc.gnosischain.com` |
+
+When `LIGHT_CLIENT_RPC_URL` points at a Nethermind light client, chains it serves (mainnet, Sepolia, Hoodi, Gnosis) are read through it instead — see [docs/LIGHT_CLIENT.md](docs/LIGHT_CLIENT.md).
+
+## Wallets + Nethermind Light Client (one-click clear signing)
+
+Point any wallet at the **KaiSign Wallet RPC**. It sits in front of the [Nethermind light client](https://github.com/NethermindEth/nethermind/pull/14457) (verified P2P JSON-RPC on `:8545`), clear-signs every transaction the wallet sends, and relays it only after you click **Approve**.
+
+```sh
+# 1. light client (in a Nethermind checkout with PR #14457)
+dotnet run --project src/Nethermind/Nethermind.LightClient -c release -- --network sepolia
+# 2. KaiSign gateway
+npm run build && npm run start:wallet-rpc -- --open
+# 3. wallet RPC URL: http://127.0.0.1:8546   ·   approvals: http://127.0.0.1:8546/
+```
+
+Approve in the browser page, by typing `y`/`n` in the gateway terminal, or automatically for SAFE verdicts (`--auto-approve safe`). Rejections reach the wallet as a normal `4001` cancel. Set `LIGHT_CLIENT_RPC_URL=http://127.0.0.1:8545` so the MCP also verifies registry attestations through the light client. Full guide: [docs/LIGHT_CLIENT.md](docs/LIGHT_CLIENT.md).
 
 ## Quick Start
 

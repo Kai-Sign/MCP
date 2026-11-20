@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Nethermind light client support** (NethermindEth/nethermind#14457) — `LIGHT_CLIENT_RPC_URL` routes registry reads (`smtRoot`, attestations) and proxy-slot reads through the locally verified light-client RPC; results report `registryReadVia`. Registry log replay uses 512-block chunks, falling back to public RPCs only for root-checked log input (`LIGHT_CLIENT_ONLY=true` disables).
+- **KaiSign Wallet RPC** (`npm run start:wallet-rpc`, `kaisign-wallet-rpc`) — wallet-facing RPC in front of the light client that holds each `eth_sendRawTransaction`, clear-signs it, and relays it after one-click approval (browser page, terminal `y`/`n`, or `--auto-approve safe`). Maps `pending`/`safe` block tags and serves pending nonces so stock wallets work with the light client.
+- Gnosis (chain 100) RPC defaults and Gnosis/Hoodi chain names.
+
 ## [1.0.0] - 2024-12-01
 
 ### Added

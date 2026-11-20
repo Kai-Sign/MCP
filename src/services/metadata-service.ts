@@ -3,6 +3,7 @@
  * Loads ERC-7730 metadata from local JSON files with caching.
  */
 
+import { verifiedRpcUrls } from './light-client.js';
 import {
   KAISIGN_METADATA_DIR,
   RPC_URLS,
@@ -328,7 +329,7 @@ export class MetadataService {
    * Make an eth_call via RPC
    */
   private async ethCall(to: string, data: string, chainId: number): Promise<string> {
-    const rpcUrls = RPC_URLS[chainId] ?? RPC_URLS[1];
+    const { urls: rpcUrls } = await verifiedRpcUrls(chainId, RPC_URLS[chainId] ?? RPC_URLS[1]);
 
     const response = await fetchWithTimeout(rpcUrls[0], {
       method: 'POST',
@@ -349,7 +350,7 @@ export class MetadataService {
    * Get eth_getStorageAt via RPC
    */
   private async ethGetStorageAt(address: string, slot: string, chainId: number): Promise<string> {
-    const rpcUrls = RPC_URLS[chainId] ?? RPC_URLS[1];
+    const { urls: rpcUrls } = await verifiedRpcUrls(chainId, RPC_URLS[chainId] ?? RPC_URLS[1]);
 
     const response = await fetchWithTimeout(rpcUrls[0], {
       method: 'POST',

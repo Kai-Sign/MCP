@@ -40,6 +40,11 @@ export const RPC_URLS: Record<number, string[]> = {
     'https://base-rpc.publicnode.com',
     'https://mainnet.base.org'
   ],
+  100: [
+    ...(process.env.GNOSIS_RPC_URL ? [process.env.GNOSIS_RPC_URL] : []),
+    'https://rpc.gnosischain.com',
+    'https://gnosis-rpc.publicnode.com'
+  ],
   42161: [
     ...(process.env.ARBITRUM_RPC_URL ? [process.env.ARBITRUM_RPC_URL] : []),
     'https://arbitrum-one-rpc.publicnode.com',

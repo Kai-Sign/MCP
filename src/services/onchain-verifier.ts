@@ -13,6 +13,13 @@
  * 5. Check the inclusion proof of keccak256(abi.encode(LEAF_TYPEHASH, chainId, target, metadataHash))
  *    against the on-chain root
  * The caller then compares the attested metadataHash with the local metadata file.
+ *
+ * With a Nethermind light client serving Sepolia (LIGHT_CLIENT_RPC_URL), every read that
+ * the verdict depends on (eth_blockNumber, smtRoot, getLatestSpecForTarget, getAttestation)
+ * goes to the light client only, so it is checked against sync-committee-authenticated
+ * state instead of trusting an RPC provider. SmtRootUpdated logs are only replay input:
+ * a wrong or incomplete log set cannot pass step 2, so they may fall back to public RPCs
+ * when the light client cannot serve the range (disable with LIGHT_CLIENT_ONLY=true).
  */
 
 import { Interface, getAddress } from 'ethers';
@@ -37,6 +44,7 @@ import {
   smtLeaf,
   verifySmtProof
 } from './registry-smt.js';
+import { LIGHT_CLIENT_MAX_LOG_RANGE, LightClientRegistry, lightClientOnly, lightClients } from './light-client.js';
 
 export interface AttestationComponents {
   chainId: number;
@@ -57,6 +65,8 @@ export interface VerificationResult {
   details: string | null;
   hash: string | null;
   onChainHash: string | null;
+  /** Which RPC the registry state behind this verdict was read from */
+  registryReadVia?: 'light-client' | 'rpc';
   uid?: string;
   attestationComponents?: AttestationComponents;
 }
@@ -96,11 +106,19 @@ export class OnChainVerifier {
   private currentRpcIndex: number = 0;
   private seed: SmtSeed | null = null;
   private state: TreeState | null = null;
+  private lightClients?: LightClientRegistry;
 
-  constructor(config?: { registryAddress?: string; rpcUrls?: string[]; seedFile?: string }) {
+  constructor(config?: { registryAddress?: string; rpcUrls?: string[]; seedFile?: string; lightClients?: LightClientRegistry }) {
     this.registryAddress = getAddress(config?.registryAddress ?? KAISIGN_REGISTRY);
     this.rpcUrls = config?.rpcUrls ?? RPC_URLS[SEPOLIA_CHAIN_ID];
     this.seedFile = config?.seedFile ?? KAISIGN_SMT_SEED_FILE;
+    // Explicit rpcUrls pin the verifier to those endpoints (tests, custom deployments).
+    this.lightClients = config?.lightClients ?? (config?.rpcUrls ? undefined : lightClients);
+  }
+
+  /** Light client serving the registry chain, if configured and reachable. */
+  private async registryLightClient(): Promise<string | undefined> {
+    return this.lightClients?.urlFor(SEPOLIA_CHAIN_ID);
   }
 
   private getRpcUrl(): string {
@@ -120,8 +138,8 @@ export class OnChainVerifier {
     this.currentRpcIndex = (this.currentRpcIndex + 1) % this.rpcUrls.length;
   }
 
-  private async rpcCall<T = string>(method: string, params: unknown[]): Promise<T> {
-    const response = await fetchWithTimeout(this.getRpcUrl(), {
+  private async rpcCall<T = string>(method: string, params: unknown[], url: string = this.getRpcUrl()): Promise<T> {
+    const response = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params })
@@ -143,8 +161,18 @@ export class OnChainVerifier {
     }
   }
 
+  /**
+   * JSON-RPC for reads the verdict depends on: the light client alone when it serves
+   * Sepolia (no silent fallback to an unverified provider), otherwise the rotation.
+   */
+  private async trustedRpc<T = string>(method: string, params: unknown[]): Promise<T> {
+    const lightClient = await this.registryLightClient();
+    if (lightClient) return this.rpcCall<T>(method, params, lightClient);
+    return this.sepoliaRpc<T>(method, params);
+  }
+
   private async callRegistry(fn: string, args: unknown[], blockTag: string = 'latest'): Promise<ReturnType<Interface['decodeFunctionResult']>> {
-    const result = await this.sepoliaRpc('eth_call', [{ to: this.registryAddress, data: REGISTRY_IFACE.encodeFunctionData(fn, args) }, blockTag]);
+    const result = await this.trustedRpc('eth_call', [{ to: this.registryAddress, data: REGISTRY_IFACE.encodeFunctionData(fn, args) }, blockTag]);
     if (!result || result === '0x') {
       throw new Error(`registry ${this.registryAddress} returned no data for ${fn}; it may not expose the address-keyed API`);
     }
@@ -158,10 +186,31 @@ export class OnChainVerifier {
   }
 
   private async fetchRootUpdates(fromBlock: number, toBlock: number): Promise<RootUpdate[]> {
+    const lightClient = await this.registryLightClient();
+    if (!lightClient) return this.fetchRootUpdatesVia(fromBlock, toBlock, LOG_BLOCK_RANGE, (m, p) => this.sepoliaRpc(m, p));
+
+    try {
+      return await this.fetchRootUpdatesVia(fromBlock, toBlock, Math.min(LOG_BLOCK_RANGE, LIGHT_CLIENT_MAX_LOG_RANGE),
+        (m, p) => this.rpcCall(m, p, lightClient));
+    } catch (e) {
+      if (lightClientOnly()) throw e;
+      // Logs are untrusted replay input; the rebuilt root is still checked against the
+      // light-client-verified smtRoot, so a public RPC cannot forge a passing tree.
+      console.warn(`[OnChainVerifier] light client could not serve SmtRootUpdated logs ${fromBlock}-${toBlock} (${(e as Error).message}); replaying them from public RPCs, root still checked via the light client`);
+      return this.fetchRootUpdatesVia(fromBlock, toBlock, LOG_BLOCK_RANGE, (m, p) => this.sepoliaRpc(m, p));
+    }
+  }
+
+  private async fetchRootUpdatesVia(
+    fromBlock: number,
+    toBlock: number,
+    range: number,
+    rpc: <T>(method: string, params: unknown[]) => Promise<T>
+  ): Promise<RootUpdate[]> {
     const updates: RootUpdate[] = [];
-    for (let start = fromBlock; start <= toBlock; start += LOG_BLOCK_RANGE) {
-      const end = Math.min(start + LOG_BLOCK_RANGE - 1, toBlock);
-      const logs = await this.sepoliaRpc<Array<{ topics: string[]; data: string; blockNumber: string; logIndex: string }>>('eth_getLogs', [{
+    for (let start = fromBlock; start <= toBlock; start += range) {
+      const end = Math.min(start + range - 1, toBlock);
+      const logs = await rpc<Array<{ topics: string[]; data: string; blockNumber: string; logIndex: string }>>('eth_getLogs', [{
         address: this.registryAddress,
         topics: [SMT_ROOT_UPDATED_TOPIC],
         fromBlock: '0x' + start.toString(16),
@@ -185,7 +234,7 @@ export class OnChainVerifier {
     }
 
     // Stay a few blocks behind head so every RPC in the rotation can serve the range.
-    const latest = Number(BigInt(await this.sepoliaRpc('eth_blockNumber', []))) - SMT_CONFIRMATIONS;
+    const latest = Number(BigInt(await this.trustedRpc('eth_blockNumber', []))) - SMT_CONFIRMATIONS;
     const fromBlock = this.state ? this.state.syncedToBlock + 1 : this.seed.fromBlock;
     const newUpdates = fromBlock <= latest ? await this.fetchRootUpdates(fromBlock, latest) : [];
     const updates = [...(this.state?.updates ?? []), ...newUpdates];
@@ -241,6 +290,7 @@ export class OnChainVerifier {
 
     try {
       const target = getAddress(contractAddress);
+      result.registryReadVia = (await this.registryLightClient()) ? 'light-client' : 'rpc';
       const state = await this.syncTree();
       const onChainRoot = await this.getOnChainRoot(state.syncedToBlock);
       result.onChainHash = onChainRoot;
@@ -274,7 +324,8 @@ export class OnChainVerifier {
       if (verifySmtProof(key, smtLeaf(chainId, target, entry.metadataHash), state.tree.proof(key), onChainRoot)) {
         result.verified = true;
         result.source = 'leaf-verified';
-        result.details = `SMT inclusion proof verified against on-chain root (${entry.approval === 'bonded' ? 'bonded finalization' : 'owner-imported seed'})`;
+        result.details = `SMT inclusion proof verified against on-chain root (${entry.approval === 'bonded' ? 'bonded finalization' : 'owner-imported seed'})`
+          + (result.registryReadVia === 'light-client' ? '; registry state verified by the Nethermind light client' : '');
       } else {
         result.source = 'mismatch';
         result.details = `SMT inclusion proof failed against on-chain root ${onChainRoot}`;
