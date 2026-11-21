@@ -1,0 +1,116 @@
+# KaiSign node: Nethermind light client + KaiSign Wallet RPC, reachable only over your
+# Tailscale tailnet (HTTPS via `tailscale serve`). Nothing but P2P ports is public.
+#
+#   iPhone (Tailscale app, wallet, Safari)
+#     └─ https://<TS_HOSTNAME>.<tailnet>.ts.net ── tailscale ── gateway :8546 ── light-client :8545
+name: kaisign-node
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  light-client:
+    image: ${LC_IMAGE:-nethermindeth/nethermind:light-client-1.0.1}
+    command:
+      - --network
+      - ${LC_NETWORK:-mainnet}
+      - --checkpoint-url
+      - ${LC_CHECKPOINT_URL:?Set LC_CHECKPOINT_URL to a trusted checkpoint provider}
+    # RPC (8545) is NOT published: only the gateway reaches it, over the compose network.
+    ports:
+      - 30303:30303/tcp
+      - 30303:30303/udp
+      - 9050:9050/tcp
+      - 9050:9050/udp
+      - 9051:9051/udp
+    volumes:
+      - light-client-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 1m
+    logging: *logging
+
+  # Optional (`--profile verified-registry`): a second light client on Sepolia so the KaiSign
+  # registry is also read through verified state when the main node follows another network.
+  # Outbound P2P only (no published ports), so it can share the host with the main client.
+  light-client-sepolia:
+    profiles: [verified-registry]
+    image: ${LC_IMAGE:-nethermindeth/nethermind:light-client-1.0.1}
+    command: [--network, sepolia, --checkpoint-url, "${LC_SEPOLIA_CHECKPOINT_URL:-https://checkpoint-sync.sepolia.ethpandaops.io}"]
+    environment:
+      AllowedHosts: "localhost;127.0.0.1;[::1];light-client-sepolia"
+    volumes:
+      - light-client-sepolia-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 1m
+    logging: *logging
+
+  tailscale:
+    image: ${TS_IMAGE:-tailscale/tailscale:stable}
+    hostname: ${TS_HOSTNAME:-kaisign}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?Set TS_AUTHKEY to a Tailscale auth key}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale-serve.json:/config/serve.json:ro
+    restart: unless-stopped
+    logging: *logging
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # Share the tailscale container's network: `tailscale serve` proxies HTTPS to 127.0.0.1:8546.
+    network_mode: service:tailscale
+    environment:
+      KAISIGN_WALLET_RPC_UPSTREAM: http://light-client:8545
+      KAISIGN_RPC_TOKEN: ${KAISIGN_RPC_TOKEN:?Set KAISIGN_RPC_TOKEN}
+      KAISIGN_APPROVAL_KEY: ${KAISIGN_APPROVAL_KEY:?Set KAISIGN_APPROVAL_KEY}
+      KAISIGN_PUBLIC_URL: ${KAISIGN_PUBLIC_URL:-}
+      KAISIGN_AUTO_APPROVE: ${KAISIGN_AUTO_APPROVE:-none}
+      KAISIGN_APPROVAL_TIMEOUT_SECONDS: ${KAISIGN_APPROVAL_TIMEOUT_SECONDS:-300}
+      KAISIGN_FEE_RECIPIENT: ${KAISIGN_FEE_RECIPIENT:-}
+      KAISIGN_FEE_AMOUNT: ${KAISIGN_FEE_AMOUNT:-}
+      KAISIGN_FEE_TOKEN: ${KAISIGN_FEE_TOKEN:-}
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC_URL:-}
+      # Set to 11155111=http://light-client-sepolia:8545 with the verified-registry profile
+      LIGHT_CLIENT_RPC_URL: ${LIGHT_CLIENT_RPC_URL:-}
+    volumes:
+      - kaisign-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - tailscale
+      - light-client
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  light-client-data:
+  light-client-sepolia-data:
+  tailscale-state:
+  kaisign-data:

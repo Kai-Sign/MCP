@@ -105,6 +105,8 @@ npm run build && npm run start:wallet-rpc -- --open
 
 Approve in the browser page, by typing `y`/`n` in the gateway terminal, or automatically for SAFE verdicts (`--auto-approve safe`). Rejections reach the wallet as a normal `4001` cancel. Set `LIGHT_CLIENT_RPC_URL=http://127.0.0.1:8545` so the MCP also verifies registry attestations through the light client. Full guide: [docs/LIGHT_CLIENT.md](docs/LIGHT_CLIENT.md).
 
+**Off your PC, approve on your iPhone:** open [`deploy/wizard.html`](deploy/wizard.html), paste a Tailscale key, and paste the generated cloud-init into any VPS provider's *User data* field. The node runs the light client and the gateway privately on your tailnet. An optional one-time USDC activation fee is verified on-chain by the node itself. See [docs/REMOTE_DEPLOY.md](docs/REMOTE_DEPLOY.md).
+
 ## Quick Start
 
 For a step-by-step local MCP setup, smoke test, Claude config, and optional HTTP/tunnel setup, see [docs/LOCAL_MCP_TUTORIAL.md](docs/LOCAL_MCP_TUTORIAL.md).

@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>KaiSign Node Setup</title>
+<!--
+  KaiSign node deploy wizard. Static and self-contained: no network requests, no analytics.
+  Secrets are generated with crypto.getRandomValues in this browser and only end up in the
+  cloud-init text you paste into YOUR server provider. KaiSign never sees them.
+-->
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#16181d; --muted:#5d6470; --line:#e2e5ea; --accent:#16181d; --accent-text:#fff; --ok:#11845b; --warn:#b36b00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --card:#181b21; --text:#eceef2; --muted:#9aa1ad; --line:#2a2f38; --accent:#eceef2; --accent-text:#0f1115; --ok:#3ccf8e; --warn:#f0a83a; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:28px 16px 80px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  h2 { font-size:17px; margin:0 0 10px; display:flex; gap:10px; align-items:center; }
+  .n { flex:0 0 26px; height:26px; border-radius:50%; background:var(--accent); color:var(--accent-text); display:grid; place-items:center; font-size:13px; font-weight:700; }
+  .muted { color:var(--muted); font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin-top:16px; }
+  label { display:block; font-weight:600; font-size:14px; margin:14px 0 4px; }
+  label.check { display:flex; gap:8px; align-items:flex-start; font-weight:400; }
+  input[type=text], input[type=password], select { width:100%; font:15px system-ui,sans-serif; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  button { font:600 16px system-ui,sans-serif; padding:13px 18px; border-radius:10px; cursor:pointer; border:1.5px solid var(--accent); background:transparent; color:var(--text); }
+  button.primary { background:var(--accent); color:var(--accent-text); width:100%; margin-top:18px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; }
+  .row button { flex:1 1 160px; }
+  textarea { width:100%; min-height:260px; font:12px/1.45 ui-monospace,Menlo,monospace; padding:10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  code { font-family:ui-monospace,Menlo,monospace; font-size:13px; overflow-wrap:anywhere; }
+  .secret { background:var(--bg); padding:10px; border-radius:8px; margin-top:6px; }
+  ol { padding-left:20px; margin:8px 0 0; } li { margin:6px 0; }
+  .fee { display:flex; justify-content:space-between; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  .fee strong { font-size:20px; }
+  .warn { color:var(--warn); font-size:13px; }
+  .ok { color:var(--ok); }
+  details summary { cursor:pointer; font-weight:600; font-size:14px; margin-top:14px; }
+  #out[hidden] { display:none; }
+  a { color:inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Run your own KaiSign node</h1>
+  <div class="muted">A Nethermind light client plus KaiSign clear-signing on a server you rent, reachable only from your own devices. Your iPhone wallet points at it; you approve every transaction on your phone.</div>
+
+  <div class="card">
+    <h2><span class="n">1</span>Choose the network</h2>
+    <label for="network">Network your wallet uses</label>
+    <select id="network">
+      <option value="mainnet">Ethereum mainnet (chain 1)</option>
+      <option value="sepolia">Sepolia testnet (chain 11155111)</option>
+      <option value="gnosis">Gnosis (chain 100)</option>
+      <option value="hoodi">Hoodi testnet (chain 560048)</option>
+    </select>
+    <label for="checkpoint">Checkpoint provider (your trust anchor)</label>
+    <input id="checkpoint" type="text" spellcheck="false">
+    <div class="muted">The light client trusts this provider once, for its starting point; everything after that is verified on your server. Use one you trust.</div>
+  </div>
+
+  <div class="card">
+    <h2><span class="n">2</span>Connect it privately with Tailscale</h2>
+    <ol class="muted">
+      <li>Install the <strong>Tailscale</strong> app on your iPhone and sign in.</li>
+      <li>In the Tailscale admin console → <strong>DNS</strong>: enable <strong>MagicDNS</strong> and <strong>HTTPS certificates</strong>.</li>
+      <li>Admin console → <strong>Settings → Keys</strong> → <em>Generate auth key</em> (one-off). Paste it below.</li>
+    </ol>
+    <label for="tskey">Tailscale auth key</label>
+    <input id="tskey" type="password" placeholder="tskey-auth-…" autocomplete="off" spellcheck="false">
+    <label for="tshost">Node name</label>
+    <input id="tshost" type="text" value="kaisign" spellcheck="false">
+    <label for="tailnet">Your tailnet DNS name (optional, shown in admin → DNS)</label>
+    <input id="tailnet" type="text" placeholder="tail1234.ts.net" spellcheck="false">
+  </div>
+
+  <div class="card">
+    <h2><span class="n">3</span>Activation</h2>
+    <div class="fee"><span>One-time activation fee</span><strong id="feeText"></strong></div>
+    <div class="muted" id="feeNote"></div>
+    <details>
+      <summary>Advanced</summary>
+      <label class="check"><input id="auto" type="checkbox"> Auto-approve transactions KaiSign marks SAFE (fully decoded and registry-attested). Everything else still waits for you.</label>
+      <label class="check"><input id="registry" type="checkbox" checked> Also verify the KaiSign registry through a second (Sepolia) light client</label>
+      <label for="ref">KaiSign code version (git commit or tag)</label>
+      <input id="ref" type="text" value="main" spellcheck="false">
+      <div class="muted">Pin a commit hash you have reviewed for a fully reproducible install.</div>
+    </details>
+    <button class="primary" id="go">Generate my server setup</button>
+    <div class="warn" id="err"></div>
+  </div>
+
+  <div id="out" hidden>
+    <div class="card">
+      <h2><span class="n">4</span>Save your private links</h2>
+      <div class="muted">Generated in this browser. Store them like a password: the approval link controls your node.</div>
+      <label>Approval page (open on your iPhone, add to Home Screen)</label>
+      <div class="secret"><code id="approvalUrl"></code></div>
+      <label>Wallet RPC URL (paste into your wallet's network settings)</label>
+      <div class="secret"><code id="walletUrl"></code></div>
+      <div class="row"><button id="saveLinks">Download links</button><button id="copyLinks">Copy links</button></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="n">5</span>Create the server</h2>
+      <ol>
+        <li>At any VPS provider (Hetzner, DigitalOcean, Vultr, Linode, AWS Lightsail …) create a server with <strong>Ubuntu 24.04 LTS</strong>, at least <strong>2 vCPU, 4 GB RAM, 40 GB disk</strong>.</li>
+        <li>Find the field called <strong>User data</strong> / <strong>Cloud config</strong> / <strong>Cloud-init</strong> and paste the text below.</li>
+        <li>Create it. Setup takes about 5–10 minutes; the light client then needs a few more minutes to sync.</li>
+      </ol>
+      <textarea id="cloudinit" readonly spellcheck="false"></textarea>
+      <div class="row"><button id="copyCi">Copy cloud-init</button><button id="saveCi">Download</button></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="n">6</span>Activate and connect (on your iPhone)</h2>
+      <ol>
+        <li>With Tailscale on, open your <strong>approval page</strong>.</li>
+        <li id="payStep">Tap <strong>Pay in MetaMask app</strong> (or another wallet) and confirm. Your node spots the payment on-chain by itself and unlocks — no account, no card.</li>
+        <li>The page then shows <strong>Connect your wallet</strong>: copy the RPC URL into your wallet's network settings.</li>
+        <li>Send transactions as usual. Each one appears on the approval page — tap <strong>Approve &amp; send</strong>.</li>
+      </ol>
+    </div>
+  </div>
+</main>
+
+<script>
+// ── Operator configuration ──────────────────────────────────────────────────
+// Set FEE_RECIPIENT to the address that receives activation fees. Empty = no fee.
+const FEE_RECIPIENT = '';
+const FEE_AMOUNT = '10';
+// Token per network; null = USDC default built into the node (mainnet, Sepolia).
+const FEE_TOKENS = { mainnet: null, sepolia: null, gnosis: undefined, hoodi: undefined };
+const REPO = 'https://github.com/Kai-Sign/MCP.git';
+// ────────────────────────────────────────────────────────────────────────────
+
+const CHECKPOINTS = {
+  mainnet: 'https://mainnet.checkpoint.sigp.io',
+  sepolia: 'https://checkpoint-sync.sepolia.ethpandaops.io',
+  gnosis: 'https://checkpoint.gnosischain.com',
+  hoodi: 'https://checkpoint-sync.hoodi.ethpandaops.io'
+};
+const $ = id => document.getElementById(id);
+
+function feeFor(network) {
+  if (!FEE_RECIPIENT) return null;
+  const token = FEE_TOKENS[network];
+  if (token === undefined) return null;
+  return { recipient: FEE_RECIPIENT, amount: FEE_AMOUNT, token };
+}
+
+function syncNetwork() {
+  const n = $('network').value;
+  $('checkpoint').value = CHECKPOINTS[n];
+  $('registry').checked = n !== 'sepolia';
+  $('registry').disabled = n === 'sepolia';
+  const fee = feeFor(n);
+  $('feeText').textContent = fee ? fee.amount + ' USDC' : 'Free';
+  $('feeNote').textContent = fee
+    ? 'Paid once from your own wallet after the server starts (plus a few unique cents that identify your node). Your node checks the payment on-chain through its own light client — no payment processor, no sign-up.'
+    : 'No activation fee is configured for this network.';
+  $('payStep').hidden = !fee;
+}
+
+function secret() {
+  const b = new Uint8Array(32);
+  crypto.getRandomValues(b);
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+const envLine = (k, v) => {
+  if (/[\r\n]/.test(v)) throw new Error(k + ' must be a single line');
+  return k + '=' + v;
+};
+
+function build() {
+  $('err').textContent = '';
+  const network = $('network').value;
+  const checkpoint = $('checkpoint').value.trim();
+  const tskey = $('tskey').value.trim();
+  const host = $('tshost').value.trim().toLowerCase();
+  const tailnet = $('tailnet').value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  const ref = $('ref').value.trim() || 'main';
+  if (!/^https:\/\/[^\s]+$/.test(checkpoint)) throw new Error('Checkpoint provider must be an https:// URL.');
+  if (!/^tskey-[A-Za-z0-9-]+$/.test(tskey)) throw new Error('Paste a Tailscale auth key (starts with tskey-).');
+  if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(host)) throw new Error('Node name: lowercase letters, digits and dashes.');
+  if (tailnet && !/^[a-z0-9.-]+\.ts\.net$/.test(tailnet)) throw new Error('Tailnet DNS name looks like tail1234.ts.net.');
+  if (!/^[A-Za-z0-9._\/-]+$/.test(ref)) throw new Error('Invalid git ref.');
+
+  const rpcToken = secret();
+  const approvalKey = secret();
+  const base = 'https://' + host + '.' + (tailnet || '<your-tailnet>.ts.net');
+  const approvalUrl = base + '/a/' + approvalKey + '/';
+  const walletUrl = base + '/rpc/' + rpcToken;
+
+  const env = [
+    envLine('LC_NETWORK', network),
+    envLine('LC_CHECKPOINT_URL', checkpoint),
+    envLine('TS_AUTHKEY', tskey),
+    envLine('TS_HOSTNAME', host),
+    envLine('KAISIGN_RPC_TOKEN', rpcToken),
+    envLine('KAISIGN_APPROVAL_KEY', approvalKey),
+    envLine('KAISIGN_PUBLIC_URL', tailnet ? base : ''),
+    envLine('KAISIGN_AUTO_APPROVE', $('auto').checked ? 'safe' : 'none')
+  ];
+  const fee = feeFor(network);
+  if (fee) {
+    env.push(envLine('KAISIGN_FEE_RECIPIENT', fee.recipient), envLine('KAISIGN_FEE_AMOUNT', fee.amount));
+    if (fee.token) env.push(envLine('KAISIGN_FEE_TOKEN', fee.token));
+  }
+  if ($('registry').checked && network !== 'sepolia') {
+    env.push('COMPOSE_PROFILES=verified-registry', 'LIGHT_CLIENT_RPC_URL=11155111=http://light-client-sepolia:8545');
+  }
+
+  const ci = [
+    '#cloud-config',
+    '# KaiSign node — generated by deploy/wizard.html. Contains secrets: keep private.',
+    'package_update: true',
+    'packages: [ca-certificates, curl, git]',
+    'write_files:',
+    '  - path: /opt/kaisign/node.env',
+    "    permissions: '0600'",
+    '    owner: root:root',
+    '    content: |',
+    ...env.map(l => '      ' + l),
+    'runcmd:',
+    '  - install -m 0755 -d /etc/apt/keyrings',
+    '  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc',
+    '  - chmod a+r /etc/apt/keyrings/docker.asc',
+    `  - [sh, -c, 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list']`,
+    '  - apt-get update',
+    '  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin',
+    '  - git clone ' + REPO + ' /opt/kaisign/src',
+    '  - git -C /opt/kaisign/src checkout --detach ' + ref,
+    '  - install -m 0600 /opt/kaisign/node.env /opt/kaisign/src/deploy/.env',
+    "  - [sh, -c, 'cd /opt/kaisign/src/deploy && docker compose up -d --build']",
+    ''
+  ].join('\n');
+
+  $('cloudinit').value = ci;
+  $('approvalUrl').textContent = approvalUrl;
+  $('walletUrl').textContent = walletUrl;
+  window._links = 'KaiSign node (' + network + ')\n\nApproval page:\n' + approvalUrl + '\n\nWallet RPC URL:\n' + walletUrl + '\n' +
+    (tailnet ? '' : '\nReplace <your-tailnet>.ts.net with your tailnet DNS name (Tailscale admin → DNS).\n');
+  $('out').hidden = false;
+  $('out').scrollIntoView({ behavior: 'smooth' });
+}
+
+function download(name, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function copy(text, btn) {
+  try { await navigator.clipboard.writeText(text); const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = t, 1500); } catch {}
+}
+
+$('network').addEventListener('change', syncNetwork);
+$('go').addEventListener('click', () => { try { build(); } catch (e) { $('err').textContent = e.message; } });
+$('copyCi').addEventListener('click', e => copy($('cloudinit').value, e.target));
+$('saveCi').addEventListener('click', () => download('kaisign-cloud-init.yaml', $('cloudinit').value));
+$('copyLinks').addEventListener('click', e => copy(window._links, e.target));
+$('saveLinks').addEventListener('click', () => download('kaisign-links.txt', window._links));
+syncNetwork();
+</script>
+</body>
+</html>

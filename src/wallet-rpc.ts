@@ -17,13 +17,16 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { join } from 'node:path';
+import QRCode from 'qrcode';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { Transaction, formatEther, formatUnits } from 'ethers';
 import { clearSignTransaction } from './tools/clear-sign-transaction.js';
 import { formatPlain } from './cli.js';
 import { lightClients, parseLightClientConfig } from './services/light-client.js';
+import { ActivationManager, feeConfigFromEnv } from './services/activation.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -77,7 +80,28 @@ export interface WalletRpcOptions {
   /** Called when a transaction needs a human decision */
   onPending?: (approval: Approval) => void;
   token?: string;
+  /**
+   * Remote mode (VPS / tailnet): secrets in the URL path replace the loopback-only rule.
+   * Wallet URL: /rpc/<rpcToken>; owner approval page: /a/<approvalKey>/.
+   * A leaked wallet URL can read and queue transactions but never approve them.
+   */
+  remote?: { rpcToken: string; approvalKey: string };
+  /** Optional on-chain activation fee; RPC stays closed until it is paid */
+  activation?: ActivationManager;
 }
+
+/** Minimum secret length for remote mode: 128 bits as hex. */
+export const MIN_SECRET_LENGTH = 32;
+
+function secretEquals(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+/** Methods a wallet needs to add the network before the node is activated. */
+const PRE_ACTIVATION_METHODS = new Set(['eth_chainId', 'net_version', 'web3_clientVersion']);
+export const NOT_ACTIVATED = -32002;
 
 type JsonRpcId = string | number | null;
 interface JsonRpcRequest { jsonrpc?: string; id?: JsonRpcId; method?: unknown; params?: unknown }
@@ -195,10 +219,11 @@ function isExtensionOrigin(origin: string): boolean {
   return /^(chrome-extension|moz-extension|safari-web-extension|ms-browser-extension):\/\//.test(origin);
 }
 
-function isSelfOrigin(origin: string, hostHeader: string | undefined): boolean {
+function isSelfOrigin(origin: string, hostHeader: string | undefined, remote = false): boolean {
   if (!hostHeader) return false;
   try {
     const o = new URL(origin);
+    if (remote) return (o.protocol === 'https:' || o.protocol === 'http:') && o.host === hostHeader;
     return o.protocol === 'http:' && o.host === hostHeader && isLoopbackHost(o.host);
   } catch {
     return false;
@@ -256,7 +281,7 @@ interface Waiter {
 export class WalletRpcGateway {
   readonly token: string;
   readonly server: Server;
-  private readonly options: Required<Omit<WalletRpcOptions, 'onPending' | 'token' | 'host' | 'port'>> & Pick<WalletRpcOptions, 'onPending'>;
+  private readonly options: Required<Omit<WalletRpcOptions, 'onPending' | 'token' | 'host' | 'port' | 'remote' | 'activation'>> & Pick<WalletRpcOptions, 'onPending' | 'remote' | 'activation'>;
   private readonly approvals = new Map<string, Approval>();
   private readonly waiters = new Map<string, Waiter>();
   /** sender → next nonce after the highest transaction this gateway relayed */
@@ -265,8 +290,18 @@ export class WalletRpcGateway {
   private chainIdPromise?: Promise<number>;
 
   constructor(options: WalletRpcOptions) {
-    this.token = options.token ?? randomBytes(24).toString('hex');
+    if (options.remote) {
+      for (const [name, value] of Object.entries(options.remote)) {
+        if (!/^[A-Za-z0-9_-]+$/.test(value) || value.length < MIN_SECRET_LENGTH) {
+          throw new Error(`remote ${name} must be at least ${MIN_SECRET_LENGTH} URL-safe characters`);
+        }
+      }
+      if (options.remote.rpcToken === options.remote.approvalKey) throw new Error('rpcToken and approvalKey must differ');
+    }
+    this.token = options.remote?.approvalKey ?? options.token ?? randomBytes(24).toString('hex');
     this.options = {
+      remote: options.remote,
+      activation: options.activation,
       upstream: options.upstream,
       autoApprove: options.autoApprove ?? 'none',
       approvalTimeoutMs: options.approvalTimeoutMs ?? 5 * 60_000,
@@ -365,6 +400,12 @@ export class WalletRpcGateway {
     }
     const request = item as JsonRpcRequest & { method: string };
     const isNotification = !('id' in request);
+
+    const activation = this.options.activation;
+    if (activation && !activation.active && !PRE_ACTIVATION_METHODS.has(request.method)) {
+      return isNotification ? undefined : rpcError(request.id, NOT_ACTIVATED,
+        'KaiSign node not activated yet: open your approval page and pay the one-time setup fee');
+    }
 
     if (request.method === 'eth_sendRawTransaction') {
       const response = await this.handleSend(request, res);
@@ -500,58 +541,110 @@ export class WalletRpcGateway {
     res.end(JSON.stringify(body));
   }
 
+  /** Map a request path onto the RPC endpoint or the owner UI, checking path secrets. */
+  private route(pathname: string): { kind: 'rpc' } | { kind: 'ui'; sub: string } | undefined {
+    const remote = this.options.remote;
+    if (!remote) {
+      if (pathname === '/' || pathname === '/rpc') return pathname === '/rpc' ? { kind: 'rpc' } : { kind: 'ui', sub: '/' };
+      return { kind: 'ui', sub: pathname };
+    }
+    const [, head, secret, ...rest] = pathname.split('/');
+    if (head === 'rpc' && secret && rest.length === 0 && secretEquals(secret, remote.rpcToken)) return { kind: 'rpc' };
+    if (head === 'a' && secret && secretEquals(secret, remote.approvalKey)) return { kind: 'ui', sub: '/' + rest.join('/') };
+    return undefined;
+  }
+
+  private uiBase(): string {
+    return this.options.remote ? `/a/${this.options.remote.approvalKey}` : '';
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // Same exposure rules as the light client: loopback Host only (blocks DNS rebinding),
-    // wallet extensions and non-browser callers allowed, ordinary websites refused.
-    if (!isLoopbackHost(req.headers.host)) {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+
+    if (req.method === 'GET' && url.pathname === '/healthz') {
+      this.sendJson(req, res, 200, { ok: true });
+      return;
+    }
+
+    // Local mode follows the light client's exposure rules: loopback Host only (blocks DNS
+    // rebinding). Remote mode is reached through a tailnet/VPN name and relies on path secrets.
+    if (!this.options.remote && !isLoopbackHost(req.headers.host)) {
       res.writeHead(403).end('non-loopback Host header refused');
       return;
     }
+    // Wallet extensions and non-browser callers allowed, ordinary websites refused.
     const origin = req.headers.origin;
-    const selfOrigin = origin ? isSelfOrigin(origin, req.headers.host) : false;
+    const selfOrigin = origin ? isSelfOrigin(origin, req.headers.host, Boolean(this.options.remote)) : false;
     if (origin && !isExtensionOrigin(origin) && !selfOrigin) {
       res.writeHead(403).end('origin not allowed');
       return;
     }
-
-    const url = new URL(req.url ?? '/', 'http://localhost');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204, this.corsHeaders(req)).end();
       return;
     }
 
-    if (req.method === 'POST' && (url.pathname === '/' || url.pathname === '/rpc')) {
+    // A POST to "/" is the classic local wallet URL; remote mode only accepts /rpc/<token>.
+    const target = !this.options.remote && req.method === 'POST' && url.pathname === '/' ? { kind: 'rpc' as const } : this.route(url.pathname);
+    if (!target) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' }).end('not found');
+      return;
+    }
+
+    if (target.kind === 'rpc') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { Allow: 'POST', 'Content-Type': 'text/plain' }).end('JSON-RPC needs POST');
+        return;
+      }
       await this.handleRpc(req, res);
       return;
     }
 
-    if (req.method === 'GET' && url.pathname === '/') {
+    const sub = target.sub;
+    if (req.method === 'GET' && sub === '/') {
       this.sendPage(res);
       return;
     }
 
-    if (req.method === 'GET' && url.pathname === '/status') {
-      await this.sendStatus(req, res);
+    // Owner API: the approval page only, never wallet extensions or websites.
+    const ownerRequest = (!origin || selfOrigin) && secretEquals(String(req.headers['x-kaisign-token'] ?? ''), this.token);
+
+    if (req.method === 'GET' && sub === '/activation/qr.svg') {
+      // <img> requests cannot carry the token header; in remote mode the path secret already
+      // authenticated this request, and the QR only encodes the public payment request.
+      const status = this.options.activation?.status();
+      if (!status?.links || (!this.options.remote && !ownerRequest && origin)) {
+        res.writeHead(404).end();
+        return;
+      }
+      const svg = await QRCode.toString(status.links.eip681, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' }).end(svg);
       return;
     }
 
-    // Approval API: page/local tools only, never wallet extensions or websites.
-    if (url.pathname.startsWith('/approvals')) {
-      if ((origin && !selfOrigin) || req.headers['x-kaisign-token'] !== this.token) {
-        this.sendJson(req, res, 403, { error: 'approval API needs the page token' });
-        return;
-      }
-      if (req.method === 'GET' && url.pathname === '/approvals') {
-        this.sendJson(req, res, 200, this.list());
-        return;
-      }
-      const match = /^\/approvals\/([^/]+)\/(approve|reject)$/.exec(url.pathname);
-      if (req.method === 'POST' && match) {
-        const ok = this.decide(match[1], match[2] === 'approve', 'browser', match[2] === 'reject' ? 'rejected in browser' : undefined);
-        this.sendJson(req, res, ok ? 200 : 404, { ok });
-        return;
-      }
+    if (!ownerRequest) {
+      this.sendJson(req, res, 403, { error: 'owner API needs the approval page token' });
+      return;
+    }
+
+    if (req.method === 'GET' && sub === '/status') {
+      await this.sendStatus(req, res);
+      return;
+    }
+    if (req.method === 'GET' && sub === '/activation') {
+      this.sendJson(req, res, 200, this.options.activation?.status() ?? { required: false, active: true });
+      return;
+    }
+    if (req.method === 'GET' && sub === '/approvals') {
+      this.sendJson(req, res, 200, this.list());
+      return;
+    }
+    const match = /^\/approvals\/([^/]+)\/(approve|reject)$/.exec(sub);
+    if (req.method === 'POST' && match) {
+      const ok = this.decide(match[1], match[2] === 'approve', 'browser', match[2] === 'reject' ? 'rejected in browser' : undefined);
+      this.sendJson(req, res, ok ? 200 : 404, { ok });
+      return;
     }
 
     res.writeHead(404, { 'Content-Type': 'text/plain' }).end('not found');
@@ -602,6 +695,8 @@ export class WalletRpcGateway {
       chainId,
       autoApprove: this.options.autoApprove,
       pending: this.list().pending.length,
+      walletRpcPath: this.options.remote ? `/rpc/${this.options.remote.rpcToken}` : '/',
+      activation: this.options.activation?.status() ?? { required: false, active: true },
       lightClient
     });
   }
@@ -613,16 +708,16 @@ export class WalletRpcGateway {
       'Cache-Control': 'no-store',
       // The page holds the approval token: never let another site frame or script it.
       'X-Frame-Options': 'DENY',
-      'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
+      'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
       'Referrer-Policy': 'no-referrer'
     });
-    res.end(approvalPage(nonce, this.token));
+    res.end(approvalPage(nonce, this.token, this.uiBase()));
   }
 }
 
 // ─── Approval page ──────────────────────────────────────────────────────────
 
-function approvalPage(nonce: string, token: string): string {
+function approvalPage(nonce: string, token: string, base: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -640,7 +735,7 @@ function approvalPage(nonce: string, token: string): string {
   body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
   main { max-width:760px; margin:0 auto; padding:24px 16px 64px; }
   h1 { font-size:20px; margin:0 0 4px; }
-  .muted { color:var(--muted); font-size:13px; }
+  .muted { color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:16px; }
   .badge { display:inline-block; font-weight:700; font-size:12px; letter-spacing:.04em; padding:2px 8px; border-radius:999px; border:1.5px solid currentColor; }
   .safe { color:var(--safe); } .review { color:var(--review); } .reject { color:var(--reject); }
@@ -658,17 +753,31 @@ function approvalPage(nonce: string, token: string): string {
   .row:first-child { border-top:0; }
   code { font-family:ui-monospace,Menlo,monospace; font-size:13px; }
   .warn { color:var(--reject); font-size:13px; margin:4px 0 0; }
+  .pay h2, .wallet h2 { font-size:17px; margin:0 0 6px; }
+  .amount { font-size:28px; font-weight:700; margin:6px 0 2px; overflow-wrap:anywhere; }
+  .stack { display:flex; flex-direction:column; gap:10px; margin-top:14px; }
+  a.btn { display:block; text-align:center; text-decoration:none; font:600 16px system-ui,sans-serif; padding:14px; border-radius:10px; border:1.5px solid var(--btn); color:var(--text); }
+  a.btn.primary, button.primary { background:var(--btn); color:var(--btn-text); }
+  .qr { display:block; width:200px; max-width:100%; margin:14px auto 4px; background:#fff; padding:8px; border-radius:8px; }
+  .copy { display:flex; gap:8px; align-items:center; margin-top:8px; }
+  .copy code { flex:1; background:var(--bg); padding:8px; border-radius:8px; overflow-wrap:anywhere; font-size:12px; }
+  .copy button { flex:0 0 auto; padding:8px 12px; font-size:14px; }
+  .ok { color:var(--safe); font-weight:600; }
 </style>
 </head>
 <body>
 <main>
   <h1>KaiSign approvals</h1>
   <div class="muted" id="conn">Connecting…</div>
+  <div id="activation"></div>
   <div id="pending"></div>
+  <div id="wallet"></div>
   <div class="card"><strong>Recent</strong><div id="recent" class="muted">None yet.</div></div>
 </main>
 <script nonce="${nonce}">
 const TOKEN = ${JSON.stringify(token)};
+const BASE = ${JSON.stringify(base)};
+const H = { headers:{ 'X-KaiSign-Token': TOKEN } };
 const $ = (tag, cls, text) => { const el = document.createElement(tag); if (cls) el.className = cls; if (text !== undefined) el.textContent = text; return el; };
 const sym = id => id === 100 ? 'xDAI' : 'ETH';
 const fmtWei = (wei, id) => { try { const v = BigInt(wei); const whole = v / 10n**18n; const frac = (v % 10n**18n).toString().padStart(18,'0').replace(/0+$/,''); return whole + (frac ? '.' + frac : '') + ' ' + sym(id); } catch { return wei; } };
@@ -677,7 +786,7 @@ let shown = '';
 
 async function decide(id, action, risky) {
   if (action === 'approve' && risky && !confirm('KaiSign could NOT clear-sign this transaction. Broadcast it anyway?')) return;
-  await fetch('/approvals/' + encodeURIComponent(id) + '/' + action, { method:'POST', headers:{ 'X-KaiSign-Token': TOKEN } });
+  await fetch(BASE + '/approvals/' + encodeURIComponent(id) + '/' + action, { method:'POST', headers:{ 'X-KaiSign-Token': TOKEN } });
   refresh();
 }
 
@@ -705,16 +814,84 @@ function card(a) {
   return c;
 }
 
+function copyRow(text) {
+  const row = $('div', 'copy'); const code = $('code', '', text); const b = $('button', '', 'Copy');
+  b.onclick = async () => { try { await navigator.clipboard.writeText(text); b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500); } catch {} };
+  row.append(code, b); return row;
+}
+
+/** ERC-20 transfer(recipient, amount) calldata */
+function transferData(to, units) {
+  return '0xa9059cbb' + to.slice(2).toLowerCase().padStart(64, '0') + BigInt(units).toString(16).padStart(64, '0');
+}
+
+async function payInBrowser(a, btn) {
+  try {
+    btn.textContent = 'Check your wallet…';
+    const [from] = await window.ethereum.request({ method:'eth_requestAccounts' });
+    try { await window.ethereum.request({ method:'wallet_switchEthereumChain', params:[{ chainId:'0x' + a.chainId.toString(16) }] }); } catch {}
+    await window.ethereum.request({ method:'eth_sendTransaction', params:[{ from, to:a.token, data:transferData(a.recipient, a.amountUnits) }] });
+    btn.textContent = 'Sent — waiting for confirmation…';
+  } catch (e) { btn.textContent = 'Pay with this browser wallet'; alert(e.message || e); }
+}
+
+let activationKey = '';
+function renderActivation(a) {
+  const box = document.getElementById('activation');
+  const key = JSON.stringify([a.required, a.active, a.amountUnits, a.error && !a.amountUnits]);
+  if (!a.required || (a.active && activationKey === key)) { if (!a.required) box.replaceChildren(); return; }
+  if (activationKey === key) { const s = document.getElementById('scan'); if (s && a.scannedTo) s.textContent = 'Watching the chain for your payment… (block ' + a.scannedTo + ')'; return; }
+  activationKey = key;
+  const c = $('div', 'card pay');
+  if (a.active) {
+    c.append($('h2', 'ok', '✓ Node activated'), $('div', 'muted', 'Payment ' + a.activated.txHash.slice(0, 10) + '…' + a.activated.txHash.slice(-8) + ' verified by your own light client.'));
+    box.replaceChildren(c); return;
+  }
+  c.append($('h2', '', 'Activate your KaiSign node'));
+  if (!a.amountUnits) { c.append($('div', 'muted', 'Preparing payment request: ' + (a.error || 'waiting for the light client to sync…'))); box.replaceChildren(c); return; }
+  c.append($('div', 'muted', 'One-time setup fee, paid on ' + a.chainName + '. Send exactly:'));
+  c.append($('div', 'amount', a.amount + ' ' + a.symbol));
+  c.append($('div', 'muted', 'The last digits identify this node. Your node verifies the payment itself — no payment processor, no account.'));
+  const st = $('div', 'stack');
+  if (window.ethereum) {
+    const b = $('button', 'primary', 'Pay with this browser wallet'); b.onclick = () => payInBrowser(a, b); st.append(b);
+  }
+  const mm = $('a', 'btn' + (window.ethereum ? '' : ' primary'), 'Pay in MetaMask app'); mm.href = a.links.metamask; st.append(mm);
+  const any = $('a', 'btn', 'Pay with another wallet app'); any.href = a.links.eip681; st.append(any);
+  c.append(st);
+  const qr = $('img', 'qr'); qr.src = BASE + '/activation/qr.svg'; qr.alt = 'Payment QR code'; c.append(qr);
+  c.append($('div', 'muted', 'Or scan with a wallet on another phone.'));
+  const det = $('details'); det.append($('summary', 'muted', 'Pay manually'));
+  det.append($('div', 'muted', 'Token (' + a.symbol + ') contract'), copyRow(a.token), $('div', 'muted', 'Send to'), copyRow(a.recipient), $('div', 'muted', 'Amount'), copyRow(a.amount));
+  c.append(det);
+  const scan = $('div', 'muted', 'Watching the chain for your payment…'); scan.id = 'scan'; c.append(scan);
+  box.replaceChildren(c);
+}
+
+let walletShown = false;
+function renderWallet(status) {
+  if (walletShown || !status || !status.walletRpcPath || status.walletRpcPath === '/') return;
+  walletShown = true;
+  const c = $('div', 'card wallet');
+  c.append($('h2', '', 'Connect your wallet'));
+  c.append($('div', 'muted', 'In your wallet, edit the network with chain ID ' + status.chainId + ' and set its RPC URL to:'));
+  c.append(copyRow(location.origin + status.walletRpcPath));
+  c.append($('div', 'muted', 'Keep this URL private. It can queue transactions, but only this page can approve them.'));
+  document.getElementById('wallet').replaceChildren(c);
+}
+
 async function refresh() {
   try {
     const [list, status] = await Promise.all([
-      fetch('/approvals', { headers:{ 'X-KaiSign-Token': TOKEN } }).then(r => r.json()),
-      fetch('/status').then(r => r.json()).catch(() => null)
+      fetch(BASE + '/approvals', H).then(r => r.json()),
+      fetch(BASE + '/status', H).then(r => r.json()).catch(() => null)
     ]);
+    if (status && status.activation) renderActivation(status.activation);
+    if (status && (!status.activation || status.activation.active)) renderWallet(status);
     if (status) {
       const lc = status.lightClient || {};
       const fresh = lc.latest && typeof lc.latest.fresh === 'boolean' ? (lc.latest.fresh ? 'fresh head' : 'STALE head') : (lc.startupStage || lc.error || 'unknown');
-      document.getElementById('conn').textContent = 'Wallet RPC: ' + location.origin + ' · chain ' + status.chainId + ' · light client: ' + fresh + ' · auto-approve: ' + status.autoApprove;
+      document.getElementById('conn').textContent = 'Node: ' + location.host + ' · chain ' + status.chainId + ' · light client: ' + fresh + ' · auto-approve: ' + status.autoApprove;
     }
     const key = JSON.stringify(list.pending.map(a => a.id));
     if (key !== shown) {
@@ -763,7 +940,13 @@ function usage(): string {
     'KaiSign and held until you approve it in the browser page, or type y / n here.',
     '',
     'Env: KAISIGN_WALLET_RPC_UPSTREAM, KAISIGN_WALLET_RPC_PORT, KAISIGN_WALLET_RPC_HOST,',
-    '     KAISIGN_AUTO_APPROVE, KAISIGN_APPROVAL_TIMEOUT_SECONDS, LIGHT_CLIENT_RPC_URL'
+    '     KAISIGN_AUTO_APPROVE, KAISIGN_APPROVAL_TIMEOUT_SECONDS, LIGHT_CLIENT_RPC_URL',
+    '',
+    'Remote mode (VPS / tailnet, see docs/REMOTE_DEPLOY.md):',
+    '  KAISIGN_RPC_TOKEN, KAISIGN_APPROVAL_KEY   secrets (>= 32 URL-safe chars) -> /rpc/<token>, /a/<key>/',
+    '  KAISIGN_PUBLIC_URL                        e.g. https://kaisign.tail1234.ts.net (for printed links)',
+    '  KAISIGN_DATA_DIR                          activation state (default ./.kaisign)',
+    '  KAISIGN_FEE_RECIPIENT, KAISIGN_FEE_AMOUNT optional one-time activation fee (USDC by default)'
   ].join('\n');
 }
 
@@ -789,15 +972,40 @@ async function main(): Promise<void> {
   const autoApprove = String(flags['auto-approve'] ?? process.env.KAISIGN_AUTO_APPROVE ?? 'none') === 'safe' ? 'safe' : 'none';
   const timeoutSeconds = Number(flags.timeout ?? process.env.KAISIGN_APPROVAL_TIMEOUT_SECONDS ?? 300);
 
-  if (!isLoopbackHost(host.includes(':') && !host.startsWith('[') ? `[${host}]` : host)) {
-    console.error(`Refusing to listen on ${host}: the gateway has no authentication. Keep it on loopback.`);
+  const rpcToken = process.env.KAISIGN_RPC_TOKEN?.trim();
+  const approvalKey = process.env.KAISIGN_APPROVAL_KEY?.trim();
+  const remote = rpcToken || approvalKey ? { rpcToken: rpcToken ?? '', approvalKey: approvalKey ?? '' } : undefined;
+  if (remote && (!remote.rpcToken || !remote.approvalKey)) {
+    console.error('Remote mode needs both KAISIGN_RPC_TOKEN and KAISIGN_APPROVAL_KEY.');
     process.exit(1);
   }
+
+  if (!remote && !isLoopbackHost(host.includes(':') && !host.startsWith('[') ? `[${host}]` : host)) {
+    console.error(`Refusing to listen on ${host} without remote-mode secrets (KAISIGN_RPC_TOKEN / KAISIGN_APPROVAL_KEY). Keep it on loopback.`);
+    process.exit(1);
+  }
+
+  const upstreamRpc = async <T>(method: string, params: unknown[]): Promise<T> => {
+    const response = await fetch(upstream, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      signal: AbortSignal.timeout(95_000)
+    });
+    const body = await response.json() as { result?: T; error?: { message: string } };
+    if (body.error) throw new Error(body.error.message);
+    return body.result as T;
+  };
+  const dataDir = process.env.KAISIGN_DATA_DIR ?? '.kaisign';
+  const fee = feeConfigFromEnv();
+  const activation = fee ? new ActivationManager(upstreamRpc, fee, join(dataDir, 'activation.json')) : undefined;
 
   // The upstream light client also verifies KaiSign registry reads when it serves Sepolia.
   lightClients.add({ url: upstream });
 
-  const pageUrl = () => `http://127.0.0.1:${port}/`;
+  const publicBase = (process.env.KAISIGN_PUBLIC_URL ?? `http://127.0.0.1:${port}`).replace(/\/+$/, '');
+  const pageUrl = () => remote ? `${publicBase}/a/${remote.approvalKey}/` : `${publicBase}/`;
+  const walletUrl = () => remote ? `${publicBase}/rpc/${remote.rpcToken}` : publicBase;
   const interactive = Boolean(process.stdin.isTTY);
 
   const gateway = new WalletRpcGateway({
@@ -805,6 +1013,8 @@ async function main(): Promise<void> {
     autoApprove,
     approvalTimeoutMs: timeoutSeconds * 1000,
     rewriteBlockTags: !flags['no-rewrite-tags'],
+    remote,
+    activation,
     onPending: approval => {
       const bar = '━'.repeat(60);
       console.error(`\n${bar}\nKaiSign approval #${approval.id}  [${approval.clearSign.verdict.toUpperCase()}]  ${approval.clearSign.intent}\n${bar}`);
@@ -817,6 +1027,7 @@ async function main(): Promise<void> {
   });
 
   const { port: boundPort } = await gateway.listen(port, host);
+  activation?.start();
   const chainHint = await fetch(upstream, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -826,8 +1037,10 @@ async function main(): Promise<void> {
 
   console.error([
     'KaiSign Wallet RPC is running',
-    `  Wallet RPC URL : http://127.0.0.1:${boundPort}${chainHint !== undefined ? `   (chain ID ${chainHint})` : ''}`,
-    `  Approvals page : http://127.0.0.1:${boundPort}/`,
+    `  Wallet RPC URL : ${remote ? walletUrl() : `http://127.0.0.1:${boundPort}`}${chainHint !== undefined ? `   (chain ID ${chainHint})` : ''}`,
+    `  Approvals page : ${remote ? pageUrl() : `http://127.0.0.1:${boundPort}/`}`,
+    `  Mode           : ${remote ? `remote (listening on ${host}:${boundPort}, path secrets required)` : 'local (loopback only)'}`,
+    `  Activation fee : ${fee ? `${fee.amount} to ${fee.recipient} (verified on-chain by this node)` : 'none'}`,
     `  Light client   : ${upstream}${chainHint === undefined ? '   (not reachable yet — start it, the gateway will retry)' : ''}`,
     `  Auto-approve   : ${autoApprove === 'safe' ? 'SAFE verdicts (fully decoded + registry-attested)' : 'off — every transaction needs a click'}`,
     `  Timeout        : ${timeoutSeconds}s, then the wallet sees "rejected"`

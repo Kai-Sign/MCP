@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.env
+.env.*
+.kaisign
+prove_metadata_result.txt
+tests
+coverage
+*.log
+deploy/.env
